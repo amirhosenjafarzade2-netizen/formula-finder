@@ -97,7 +97,7 @@ def discover_formula(
         except Exception as e:
             raise FormulaDiscoveryError(f"PySR failed: {e}")
 
-    # === PhySO (Physics-Oriented Symbolic Regression, GA-based) ===
+    # === PhySO (GA-based Symbolic Regression) ===
     if method == "physo" and physo_available:
         try:
             import torch
@@ -107,15 +107,13 @@ def discover_formula(
             np.random.seed(seed)
             torch.manual_seed(seed)
 
-            # Prepare data as torch tensors
-            X_torch = torch.from_numpy(X_arr.T).float()   # PhySO expects (n_features, n_samples)
-            y_torch = torch.from_numpy(y_arr).float()     # must be shape (n_samples,)
+            X_torch = torch.from_numpy(X_arr.T).float()
+            y_torch = torch.from_numpy(y_arr).float()
 
-            # Dummy units (since no physical constraints)
-            X_units = [[1, 0, 0] for _ in feature_names]  # [kg, m, s] dummy
+            # Dummy units
+            X_units = [[1, 0, 0] for _ in feature_names]
             y_units = [1, 0, 0]
 
-            # Run SR
             expression, logs = physo.SR(
                 X_torch, y_torch,
                 X_names=feature_names,
@@ -128,10 +126,8 @@ def discover_formula(
                 epochs=n_iterations // 5
             )
 
-            # Get best expression
             best_expr = expression[0] if hasattr(expression, '__len__') and len(expression) > 0 else expression
 
-            # Handle PhySO API differences
             if hasattr(best_expr, "get_infix"):
                 str_formula = best_expr.get_infix()
                 sympy_expr = best_expr.get_infix_sympy()
@@ -140,7 +136,6 @@ def discover_formula(
                 str_formula = best_expr.infix()
                 equation = best_expr.sympy()
 
-            # Evaluate predictions
             y_pred_list = []
             for i in range(len(X_arr)):
                 row_dict = {sp.Symbol(name): X_arr[i, j] for j, name in enumerate(feature_names)}
@@ -153,11 +148,10 @@ def discover_formula(
             mask_valid = ~np.isnan(y_pred)
             score = r2_score(y_arr[mask_valid], y_pred[mask_valid]) if mask_valid.sum() > 0 else 0.0
 
-            # Complexity handling
             try:
                 complexity = getattr(best_expr, "complexity", max_complexity)
             except Exception:
-                complexity = max_complexity  # Fallback
+                complexity = max_complexity
 
             return {
                 "equation": equation,
@@ -199,7 +193,6 @@ def discover_formula(
 
 
 def load_and_preprocess_data(uploaded_files, n_rows=None):
-    """Load numeric Excel data or generate sample."""
     if not uploaded_files:
         st.info("Using sample data.")
         rng = np.random.default_rng(42)
@@ -229,13 +222,12 @@ def load_and_preprocess_data(uploaded_files, n_rows=None):
 
 # === Streamlit UI ===
 st.set_page_config(page_title="Formula Discovery App", layout="wide")
-
 st.title("🧮 Standalone Formula Discovery App")
 
 st.sidebar.header("⚙️ Config")
-n_iterations = st.sidebar.number_input("Iterations", min_value=10, value=100, help="Number of search iterations")
-max_complexity = st.sidebar.number_input("Max Complexity", min_value=1, value=10, help="Max equation size")
-min_rows = st.sidebar.number_input("Min Rows", min_value=5, value=10, help="Minimum data points required")
+n_iterations = st.sidebar.number_input("Iterations", min_value=10, value=100)
+max_complexity = st.sidebar.number_input("Max Complexity", min_value=1, value=10)
+min_rows = st.sidebar.number_input("Min Rows", min_value=5, value=10)
 
 uploaded_files = st.file_uploader("📁 Upload Excel files", accept_multiple_files=True, type=['xlsx', 'xls'])
 n_rows_input = st.number_input("Sample rows (0 for all)", min_value=0, value=0)
@@ -247,7 +239,7 @@ if st.button("Load Data"):
         st.session_state.df = df
         st.success(f"✅ Loaded {len(df)} rows with {len(df.columns)} numeric columns")
         with st.expander("👁️ Data Preview"):
-            st.dataframe(df.head(10), width='stretch')
+            st.dataframe(df.head(10), use_container_width=True)
 
 if 'df' not in st.session_state:
     st.warning("⚠️ Load data first.")
@@ -266,7 +258,6 @@ if not formula_features or formula_target not in params or formula_target in for
     st.error("❌ Select valid features (excluding target).")
     st.stop()
 
-# Available methods
 available_methods = []
 if pysr_available:
     available_methods.append("pysr")
@@ -274,7 +265,6 @@ if physo_available:
     available_methods.append("physo")
 available_methods.append("linear")
 
-# Method choice
 method_options = {
     "pysr": "PySR (Evolutionary Symbolic Regression)",
     "physo": "PhySO (GA-based Symbolic Regression)",
@@ -284,8 +274,7 @@ selected_method_key = st.radio(
     "📊 Select Method",
     options=available_methods,
     format_func=lambda key: method_options[key],
-    index=0,
-    help="Choose the discovery method: Evolutionary/GA for nonlinear (complex formulas with exp, trig, etc.), Linear for simple fits."
+    index=0
 )
 
 run_formula = st.button("🚀 Discover Formula", type="primary")
@@ -373,36 +362,11 @@ if run_formula:
                 mode='lines', name='Perfect Fit',
                 line=dict(dash='dash', color='red', width=2)
             ))
-            st.plotly_chart(fig, width='stretch')
-        else:
-            st.warning("⚠️ Could not evaluate formula on data points.")
-
-        formula_text = f"""Formula Discovery Results
-===================
-
-Target: {formula_result['target_name']}
-Method: {formula_result['method']}
-R² Score: {formula_result['score']:.4f}
-Complexity: {formula_result['complexity']}
-Features: {', '.join(formula_result['feature_names'])}
-
-LaTeX Formula:
-{latex_formula}
-
-Plain Text:
-{formula_result['str_formula']}"""
-        st.download_button(
-            "💾 Download Report", 
-            formula_text, 
-            f"formula_report_{formula_target}.txt", 
-            "text/plain"
-        )
+            st.plotly_chart(fig, use_container_width=True)
 
         progress_bar.progress(1.0)
-    except FormulaDiscoveryError as e:
-        st.error(f"❌ Discovery Error: {str(e)}")
+        status_text.text("✅ Done!")
+    except FormulaDiscoveryError as fe:
+        st.error(f"❌ Discovery Error: {fe}")
     except Exception as e:
-        st.error(f"💥 Unexpected Error: {str(e)}")
-    finally:
-        progress_bar.empty()
-        status_text.empty()
+        st.error(f"⚠️ Unexpected error: {e}")
