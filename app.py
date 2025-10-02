@@ -101,7 +101,6 @@ def discover_formula(
     # === PhySO (Physics-Oriented Symbolic Regression, GA-based) ===
     if method == "physo" and physo_available:
         try:
-            import physo
             import torch
 
             # Seed for reproducibility
@@ -110,50 +109,53 @@ def discover_formula(
             torch.manual_seed(seed)
 
             # Prepare data as torch tensors
-            X_torch = torch.from_numpy(X_arr.T).float()  # PhySO expects features as rows (n_features x n_samples)
-            y_torch = torch.from_numpy(y_arr).float().unsqueeze(1)
+            X_torch = torch.from_numpy(X_arr.T).float()  # (n_features, n_samples)
+            y_torch = torch.from_numpy(y_arr).float().unsqueeze(1)  # (n_samples, 1)
 
-            # Dummy units (since no physical constraints)
-            X_units = [[1, 0, 0] for _ in feature_names]  # [kg, m, s] dummy
-            y_units = [1, 0, 0]
+            # Dummy units
+            X_units = [[0.0] * 3 for _ in feature_names]  # Dummy [log10(kg), log10(m), log10(s)]
+            y_units = [0.0] * 3
 
-            # Run SR with corrected config
+            # Run SR with valid parameters only
             expression, logs = physo.SR(
-                X_torch, y_torch,
+                X_torch,
+                y_torch,
                 X_names=feature_names,
                 X_units=X_units,
                 y_name=target_name,
                 y_units=y_units,
-                op_names=["add", "mul", "sub", "div", "sin", "cos", "exp", "log", "sqrt", "neg"],
-                run_config=physo.config.config0.config0,  # Fixed: use config0.config0 instead of get("config0")
+                op_names=["add", "mul", "sub", "div", "sin", "cos", "exp", "log", "sqrt", "neg"],  # Explicit for complex ops
+                use_protected_ops=True,
+                stop_reward=1.0,
+                epochs=n_iterations // 5,  # Scaled for GA depth
+                run_config=None,  # Default config
                 parallel_mode=False,
-                epochs=n_iterations // 5,  # Adjust epochs based on iterations (e.g., 20 for 100)
-                show_progress=False
+                device='cpu'
             )
 
-            # Get best expression (assuming expression is the top one)
-            best_expr = expression[0] if isinstance(expression, list) else expression
+            # Get best expression
+            best_expr = expression[0] if hasattr(expression, '__len__') and len(expression) > 0 else expression
             str_formula = best_expr.get_infix()
             sympy_expr = best_expr.get_infix_sympy()
-            equation = sympy_expr[0] if isinstance(sympy_expr, tuple) else sympy_expr
+            equation = sympy_expr[0] if isinstance(sympy_expr, (list, tuple)) else sympy_expr
 
-            # Evaluate predictions using sympy
+            # Evaluate predictions
             y_pred_list = []
             for i in range(len(X_arr)):
-                row_dict = {sp.Symbol(name): float(X_arr[i, j]) for j, name in enumerate(feature_names)}
+                row_dict = {sp.Symbol(name): X_arr[i, j] for j, name in enumerate(feature_names)}
                 try:
                     pred_val = float(equation.subs(row_dict).evalf())
                     y_pred_list.append(pred_val)
-                except:
+                except Exception:
                     y_pred_list.append(np.nan)
             y_pred = np.array(y_pred_list)
             mask_valid = ~np.isnan(y_pred)
-            if mask_valid.sum() > 0:
-                score = r2_score(y_arr[mask_valid], y_pred[mask_valid])
-            else:
-                score = 0.0
+            score = r2_score(y_arr[mask_valid], y_pred[mask_valid]) if mask_valid.sum() > 0 else 0.0
 
-            complexity = best_expr.complexity
+            try:
+                complexity = best_expr.complexity
+            except:
+                complexity = max_complexity  # Fallback
 
             return {
                 "equation": equation,
