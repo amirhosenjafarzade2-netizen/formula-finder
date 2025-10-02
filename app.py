@@ -1,4 +1,4 @@
-# formula_app.py
+```python
 """
 Standalone Streamlit App for Formula Discovery.
 Modernized with PySR (if Julia available), PhySO (GA-based symbolic regression), and linear backup.
@@ -131,9 +131,15 @@ def discover_formula(
 
             # Get best expression
             best_expr = expression[0] if hasattr(expression, '__len__') and len(expression) > 0 else expression
-            str_formula = best_expr.get_infix()
-            sympy_expr = best_expr.get_infix_sympy()
-            equation = sympy_expr[0] if isinstance(sympy_expr, (list, tuple)) else sympy_expr
+
+            # Handle PhySO API differences
+            if hasattr(best_expr, "get_infix"):
+                str_formula = best_expr.get_infix()
+                sympy_expr = best_expr.get_infix_sympy()
+                equation = sympy_expr[0] if isinstance(sympy_expr, (list, tuple)) else sympy_expr
+            else:
+                str_formula = best_expr.infix()
+                equation = best_expr.sympy()
 
             # Evaluate predictions
             y_pred_list = []
@@ -148,9 +154,10 @@ def discover_formula(
             mask_valid = ~np.isnan(y_pred)
             score = r2_score(y_arr[mask_valid], y_pred[mask_valid]) if mask_valid.sum() > 0 else 0.0
 
+            # Complexity handling
             try:
-                complexity = best_expr.complexity
-            except:
+                complexity = getattr(best_expr, "complexity", max_complexity)
+            except Exception:
                 complexity = max_complexity  # Fallback
 
             return {
@@ -400,3 +407,4 @@ Plain Text:
     finally:
         progress_bar.empty()
         status_text.empty()
+```
