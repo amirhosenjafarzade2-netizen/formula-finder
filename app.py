@@ -1,10 +1,8 @@
 # formula_app.py
 """
 Standalone Streamlit App for Formula Discovery.
-Isolated from the main dashboard to avoid dependency conflicts.
-Uses gplearn with a monkey-patch for scikit-learn compatibility.
+Isolated from main dashboard. Uses PySR for modern symbolic regression.
 Run with: streamlit run formula_app.py
-Requirements: Pin in requirements.txt - scikit-learn==0.23.2, gplearn==0.4.2, sympy>=1.12.0, pandas, numpy, streamlit, openpyxl
 """
 
 import streamlit as st
@@ -16,22 +14,15 @@ import io
 from typing import List, Dict, Any
 import sympy as sp
 from sklearn.metrics import r2_score
+from sklearn.linear_model import LinearRegression  # Fallback
 
-# Monkey-patch for gplearn + modern sklearn compatibility
+# PySR import with fallback
+PYSR_AVAILABLE = False
 try:
-    from gplearn.genetic import SymbolicRegressor
-    # Add _validate_data method to SymbolicRegressor class
-    from sklearn.utils.validation import check_array, check_X_y
-    def _validate_data(self, *args, **kwargs):
-        if len(args) > 1:
-            return check_X_y(*args, **kwargs)
-        else:
-            return check_array(args[0], **kwargs)
-    SymbolicRegressor._validate_data = _validate_data
-    GPLEARN_AVAILABLE = True
-except ImportError:
-    GPLEARN_AVAILABLE = False
-    st.error("gplearn not available. Install with 'pip install gplearn==0.4.2 scikit-learn==0.23.2'")
+    from pysr import PySRRegressor
+    PYSR_AVAILABLE = True
+except (ImportError, Exception) as e:
+    st.warning(f"PySR unavailable ({e}); using linear fallback.")
 
 class FormulaDiscoveryError(Exception):
     pass
@@ -44,79 +35,74 @@ def discover_formula(
     n_iterations: int = 100,
     target_name: str = "y"
 ) -> Dict[str, Any]:
-    """Discover formula using gplearn."""
-    if not GPLEARN_AVAILABLE:
-        raise FormulaDiscoveryError("gplearn not available.")
-
+    """Discover formula using PySR (or linear fallback)."""
     X_arr = X.values.astype(np.float64)
     y_arr = y.values.astype(np.float64)
 
     if len(X_arr) == 0 or np.any(np.isnan(X_arr)) or np.any(np.isnan(y_arr)):
         raise FormulaDiscoveryError("Invalid data: NaNs or empty.")
 
-    # Default operators
-    operators = ["add", "sub", "mul", "div", "log", "sqrt", "sin", "cos"]
-    function_set = tuple(op for op in operators if op in ("add", "sub", "mul", "div", "log", "sqrt", "sin", "cos"))
-    if not function_set:
-        function_set = ("add", "sub", "mul", "div")
-
-    generations = min(max(5, n_iterations // 20), 50)
-
-    model = SymbolicRegressor(
-        population_size=500,
-        generations=generations,
-        tournament_size=20,
-        stopping_criteria=0.01,
-        p_crossover=0.7,
-        p_subtree_mutation=0.1,
-        p_hoist_mutation=0.05,
-        p_point_mutation=0.1,
-        max_samples=0.9,
-        verbose=0,
-        parsimony_coefficient=0.01,
-        function_set=function_set,
-        random_state=42,
-        n_jobs=1,
-        const_range=(-1.0, 1.0),
-        init_depth=(2, 6),
-        metric="pearson"  # Changed to pearson for compatibility
-    )
-
-    try:
-        model.fit(X_arr, y_arr)
-        y_pred = model.predict(X_arr)
-        score = r2_score(y_arr, y_pred)
-
-        program_str = str(model._program)
-        # Replace variables
-        for i, name in enumerate(feature_names):
-            program_str = program_str.replace(f"X{i}", name)
-        # Clean syntax
-        program_str = program_str.replace("add(", "(").replace("sub(", "(").replace("mul(", "(").replace("div(", "(")
-
+    if PYSR_AVAILABLE:
         try:
-            equation = sp.sympify(program_str)
-        except:
-            equation = sp.Symbol("f(x)")
-            program_str = str(model._program)
+            model = PySRRegressor(
+                niterations=n_iterations,
+                binary_operators=["add", "sub", "mul", "div"],
+                unary_operators=["exp", "log", "sin", "cos", "sqrt"],
+                maxsize=max_complexity,
+                loss="(x, y) -> (x - y)^2",
+                model_selection="best",
+                verbosity=0,
+                progress=False
+            )
+            model.fit(X_arr, y_arr, variable_names=feature_names)
 
-        complexity = model._program.length_
+            y_pred = model.predict(X_arr)
+            score = r2_score(y_arr, y_pred)
 
-        equation = sp.simplify(equation)
-        str_formula = str(equation)
-        for i, name in enumerate(feature_names):
-            str_formula = str_formula.replace(f"x{i}", name)
+            # Extract SymPy equation
+            equation_str = model.sympy()
+            equation = sp.sympify(equation_str)
+            complexity = len(list(sp.preorder_traversal(equation)))
 
-        return {
-            "equation": equation,
-            "str_formula": str_formula,
-            "score": float(score),
-            "complexity": int(complexity),
-            "feature_names": feature_names,
-            "target_name": target_name
-        }
-    except Exception as e:
-        raise FormulaDiscoveryError(f"gplearn failed: {str(e)}")
+            str_formula = str(sp.simplify(equation))
+            for i, name in enumerate(feature_names):
+                str_formula = str_formula.replace(f"x{i}", name)
+
+            return {
+                "equation": equation,
+                "str_formula": str_formula,
+                "score": float(score),
+                "complexity": int(complexity),
+                "feature_names": feature_names,
+                "target_name": target_name
+            }
+        except Exception as e:
+            st.warning(f"PySR failed ({e}); using linear fallback.")
+            raise  # Re-raise for now, but fallback below
+
+    # Fallback: Simple linear regression + SymPy expression
+    model = LinearRegression()
+    model.fit(X_arr, y_arr)
+    y_pred = model.predict(X_arr)
+    score = r2_score(y_arr, y_pred)
+
+    # Build SymPy linear equation
+    coeffs = model.coef_
+    intercept = model.intercept_
+    terms = [sp.Symbol(name) * coeff for name, coeff in zip(feature_names, coeffs)]
+    equation = sum(terms) + intercept
+    str_formula = str(sp.simplify(equation))
+    complexity = len(feature_names) + 1  # Basic count
+
+    return {
+        "equation": equation,
+        "str_formula": str_formula,
+        "score": float(score),
+        "complexity": int(complexity),
+        "feature_names": feature_names,
+        "target_name": target_name,
+        "fallback": True
+    }
 
 def load_and_preprocess_data(uploaded_files, n_rows=None):
     """Simple data loader."""
@@ -127,16 +113,16 @@ def load_and_preprocess_data(uploaded_files, n_rows=None):
             'Feature1': rng.normal(1.2, 0.05, 100),
             'Feature2': rng.normal(500, 50, 100),
             'Feature3': rng.normal(30, 2, 100),
-            'Target': rng.normal(10, 1, 100) + 2 * rng.normal(1.2, 0.05, 100)
+            'Target': 2 * rng.normal(1.2, 0.05, 100) + np.sin(rng.normal(30, 2, 100))  # For testing
         })
         return df
 
     dfs = []
     for uploaded_file in uploaded_files:
-        df_temp = pd.read_excel(uploaded_file, engine='openpyxl')
+        df_temp = pd.read_excel(io.BytesIO(uploaded_file.read()), engine='openpyxl')
         numeric_cols = df_temp.select_dtypes(include=[np.number]).columns.tolist()
         if numeric_cols:
-            df_temp = df_temp[numeric_cols].fillna(df_temp.median())
+            df_temp = df_temp[numeric_cols].fillna(df_temp[numeric_cols].median())
             if n_rows:
                 df_temp = df_temp.sample(n=min(n_rows, len(df_temp)), random_state=42)
             dfs.append(df_temp)
@@ -165,7 +151,8 @@ if st.button("Load Data"):
     if not df.empty:
         st.session_state.df = df
         st.success(f"Loaded {len(df)} rows with columns: {list(df.columns)}")
-        st.dataframe(df.head())
+        with st.expander("Preview"):
+            st.dataframe(df.head())
 
 if 'df' not in st.session_state:
     st.warning("Load data first.")
@@ -218,7 +205,7 @@ if run_formula:
         status_text.text("Generating plot...")
 
         # Display results
-        st.success("Discovery complete!")
+        st.success("Discovery complete!" + (" (Linear fallback used)" if formula_result.get("fallback") else ""))
         col_res1, col_res2 = st.columns(2)
         with col_res1:
             st.metric("R² Score", f"{formula_result['score']:.4f}")
