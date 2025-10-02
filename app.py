@@ -11,10 +11,14 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import io
+import os
 from typing import List, Dict, Any
 import sympy as sp
 from sklearn.metrics import r2_score
 from sklearn.linear_model import LinearRegression  # Fallback
+
+# Fix for PySR Julia env permissions on Streamlit Cloud
+os.environ['JULIA_DEPOT_PATH'] = '/tmp/julia'
 
 # PySR import with fallback
 PYSR_AVAILABLE = False
@@ -22,7 +26,10 @@ try:
     from pysr import PySRRegressor
     PYSR_AVAILABLE = True
 except (ImportError, Exception) as e:
-    st.warning(f"PySR unavailable ({e}); using linear fallback.")
+    if 'Permission denied' in str(e):
+        st.warning("PySR Julia env permission issue detected; using linear fallback. Try rebooting the app.")
+    else:
+        st.warning(f"PySR unavailable ({e}); using linear fallback.")
 
 class FormulaDiscoveryError(Exception):
     pass
@@ -74,11 +81,15 @@ def discover_formula(
                 "score": float(score),
                 "complexity": int(complexity),
                 "feature_names": feature_names,
-                "target_name": target_name
+                "target_name": target_name,
+                "is_linear": False
             }
         except Exception as e:
-            st.warning(f"PySR failed ({e}); using linear fallback.")
-            raise  # Re-raise for now, but fallback below
+            if 'Permission denied' in str(e):
+                st.warning("PySR Julia setup failed due to permissions; using linear fallback.")
+            else:
+                st.warning(f"PySR failed ({e}); using linear fallback.")
+            # Fall through to linear
 
     # Fallback: Simple linear regression + SymPy expression
     model = LinearRegression()
@@ -101,7 +112,7 @@ def discover_formula(
         "complexity": int(complexity),
         "feature_names": feature_names,
         "target_name": target_name,
-        "fallback": True
+        "is_linear": True
     }
 
 def load_and_preprocess_data(uploaded_files, n_rows=None):
@@ -119,6 +130,8 @@ def load_and_preprocess_data(uploaded_files, n_rows=None):
 
     dfs = []
     for uploaded_file in uploaded_files:
+        # Reset file pointer
+        uploaded_file.seek(0)
         df_temp = pd.read_excel(io.BytesIO(uploaded_file.read()), engine='openpyxl')
         numeric_cols = df_temp.select_dtypes(include=[np.number]).columns.tolist()
         if numeric_cols:
@@ -133,16 +146,16 @@ def load_and_preprocess_data(uploaded_files, n_rows=None):
 
 st.set_page_config(page_title="Formula Discovery App", layout="wide")
 
-st.title("Standalone Formula Discovery App")
+st.title("🧮 Standalone Formula Discovery App")
 
 # Sidebar config
-st.sidebar.header("Config")
-n_iterations = st.sidebar.number_input("Iterations", min_value=10, value=100)
-max_complexity = st.sidebar.number_input("Max Complexity", min_value=1, value=10)
-min_rows = st.sidebar.number_input("Min Rows", min_value=5, value=10)
+st.sidebar.header("⚙️ Config")
+n_iterations = st.sidebar.number_input("Iterations", min_value=10, value=100, help="Number of search iterations")
+max_complexity = st.sidebar.number_input("Max Complexity", min_value=1, value=10, help="Max equation size")
+min_rows = st.sidebar.number_input("Min Rows", min_value=5, value=10, help="Minimum data points required")
 
 # File upload
-uploaded_files = st.file_uploader("Upload Excel files", accept_multiple_files=True, type=['xlsx', 'xls'])
+uploaded_files = st.file_uploader("📁 Upload Excel files", accept_multiple_files=True, type=['xlsx', 'xls'])
 n_rows_input = st.number_input("Sample rows (0 for all)", min_value=0, value=0)
 n_rows = None if n_rows_input == 0 else n_rows_input
 
@@ -150,12 +163,12 @@ if st.button("Load Data"):
     df = load_and_preprocess_data(uploaded_files, n_rows)
     if not df.empty:
         st.session_state.df = df
-        st.success(f"Loaded {len(df)} rows with columns: {list(df.columns)}")
-        with st.expander("Preview"):
-            st.dataframe(df.head())
+        st.success(f"✅ Loaded {len(df)} rows with {len(df.columns)} numeric columns")
+        with st.expander("👁️ Data Preview"):
+            st.dataframe(df.head(10), use_container_width=True)
 
 if 'df' not in st.session_state:
-    st.warning("Load data first.")
+    st.warning("⚠️ Load data first.")
     st.stop()
 
 df = st.session_state.df
@@ -163,22 +176,22 @@ params = df.select_dtypes(include=[np.number]).columns.tolist()
 
 col1, col2 = st.columns(2)
 with col1:
-    formula_features = st.multiselect("Select Features", params, default=params[:-1] if len(params) > 1 else [])
+    formula_features = st.multiselect("🔧 Select Features", options=params, default=params[:-1] if len(params) > 1 else [])
 with col2:
-    formula_target = st.selectbox("Target", params)
+    formula_target = st.selectbox("🎯 Target Variable", options=params)
 
-if not formula_features or formula_target not in params:
-    st.error("Select features and target.")
+if not formula_features or formula_target not in params or formula_target in formula_features:
+    st.error("❌ Select valid features (excluding target).")
     st.stop()
 
-run_formula = st.button("Discover Formula")
+run_formula = st.button("🚀 Discover Formula", type="primary")
 
 if run_formula:
     progress_bar = st.progress(0)
     status_text = st.empty()
 
     try:
-        status_text.text("Preparing data...")
+        status_text.text("📊 Preparing data...")
         progress_bar.progress(0.2)
 
         X_formula = df[formula_features].copy()
@@ -189,10 +202,10 @@ if run_formula:
         y_formula = y_formula[mask]
 
         if len(X_formula) < min_rows:
-            raise FormulaDiscoveryError(f"Insufficient data: {len(X_formula)} rows")
+            raise FormulaDiscoveryError(f"Insufficient valid data: {len(X_formula)} rows (need ≥{min_rows})")
 
         progress_bar.progress(0.4)
-        status_text.text("Running symbolic regression...")
+        status_text.text("🔍 Running symbolic regression...")
 
         formula_result = discover_formula(
             X_formula, y_formula, formula_features,
@@ -202,20 +215,40 @@ if run_formula:
         )
 
         progress_bar.progress(0.8)
-        status_text.text("Generating plot...")
+        status_text.text("📈 Generating visualization...")
 
-        # Display results
-        st.success("Discovery complete!" + (" (Linear fallback used)" if formula_result.get("fallback") else ""))
+        # Enhanced Results Display
+        fallback_msg = " (Linear Approximation)" if formula_result.get("is_linear") else ""
+        st.success(f"✅ Formula discovered{fallback_msg}!")
+
+        # Metrics with better layout
         col_res1, col_res2 = st.columns(2)
         with col_res1:
-            st.metric("R² Score", f"{formula_result['score']:.4f}")
+            st.metric("📊 R² Score", f"{formula_result['score']:.4f}", delta=None, help="Model fit quality (1.0 = perfect)")
         with col_res2:
-            st.metric("Complexity", formula_result['complexity'])
+            st.metric("🔢 Complexity", formula_result['complexity'], delta=None, help="Equation simplicity (lower = better)")
 
-        st.subheader("Discovered Formula")
-        st.code(formula_result['str_formula'])
+        # Beautiful Formula Display
+        st.subheader("📜 Discovered Formula")
+        formula_type = "Linear Model" if formula_result.get("is_linear") else "Symbolic Expression"
+        st.info(f"**Type:** {formula_type}")
+        
+        # Render with LaTeX for beauty
+        latex_formula = sp.latex(formula_result['equation'])
+        st.latex(latex_formula)
+        
+        # Plain text fallback for readability
+        with st.expander("🔤 Plain Text Version"):
+            st.code(formula_result['str_formula'], language='text')
+        
+        # Explanation expander
+        with st.expander("ℹ️ Details"):
+            st.write(f"**Target:** {formula_result['target_name']}")
+            st.write(f"**Features Used:** {', '.join(formula_result['feature_names'])}")
+            if formula_result.get("is_linear"):
+                st.warning("💡 This is a linear fallback due to PySR setup issues. For full symbolic discovery, run locally or reboot the app.")
 
-        # Plot
+        # Enhanced Plot
         equation = formula_result['equation']
         y_pred = []
         for idx in range(len(X_formula)):
@@ -224,7 +257,7 @@ if run_formula:
             try:
                 pred_val = float(equation.subs(val_dict).evalf())
                 y_pred.append(pred_val)
-            except:
+            except Exception:
                 y_pred.append(np.nan)
 
         y_pred = np.array(y_pred)
@@ -236,26 +269,49 @@ if run_formula:
             fig = px.scatter(
                 x=y_actual_valid, y=y_pred_valid,
                 labels={'x': f'Actual {formula_target}', 'y': f'Predicted {formula_target}'},
-                title='Predictions vs Actual'
+                title=f'Predictions vs. Actual Values ({formula_type})',
+                trendline="ols" if formula_result.get("is_linear") else None
             )
             min_val = min(y_actual_valid.min(), y_pred_valid.min())
             max_val = max(y_actual_valid.max(), y_pred_valid.max())
-            fig.add_trace(go.Scatter(x=[min_val, max_val], y=[min_val, max_val],
-                                     mode='lines', name='Perfect Fit',
-                                     line=dict(dash='dash', color='red')))
+            fig.add_trace(go.Scatter(
+                x=[min_val, max_val], y=[min_val, max_val],
+                mode='lines', name='Perfect Fit',
+                line=dict(dash='dash', color='red', width=2)
+            ))
+            fig.update_layout(height=500, showlegend=True)
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.warning("Could not evaluate formula.")
+            st.warning("⚠️ Could not evaluate formula on data points.")
 
-        # Download
-        formula_text = f"Formula for {formula_target}\nScore: {formula_result['score']:.4f}\nComplexity: {formula_result['complexity']}\n\n{formula_result['str_formula']}"
-        st.download_button("Download Formula", formula_text, f"formula_{formula_target}.txt", "text/plain")
+        # Download with enhanced text
+        formula_text = f"""Formula Discovery Results
+===================
+
+Target: {formula_result['target_name']}
+Type: {formula_type}
+R² Score: {formula_result['score']:.4f}
+Complexity: {formula_result['complexity']}
+Features: {', '.join(formula_result['feature_names'])}
+
+LaTeX Formula:
+{latex_formula}
+
+Plain Text:
+{formula_result['str_formula']}"""
+        st.download_button(
+            "💾 Download Report", 
+            formula_text, 
+            f"formula_report_{formula_target}.txt", 
+            "text/plain",
+            help="Download full results as text file"
+        )
 
         progress_bar.progress(1.0)
     except FormulaDiscoveryError as e:
-        st.error(f"Error: {str(e)}")
+        st.error(f"❌ Discovery Error: {str(e)}")
     except Exception as e:
-        st.error(f"Unexpected error: {str(e)}")
+        st.error(f"💥 Unexpected Error: {str(e)}")
     finally:
         progress_bar.empty()
         status_text.empty()
