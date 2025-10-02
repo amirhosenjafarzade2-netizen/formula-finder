@@ -1,11 +1,9 @@
-# requirements.txt
 streamlit>=1.28.0
 pandas>=1.5.0
 numpy>=1.21.0
 plotly>=5.14.0
 sympy>=1.12.0
 pysr>=0.18.0
-physo>=0.1.0
+gplearn==0.4.2
 openpyxl>=3.1.0
-scikit-learn>=1.5.0
-torch>=2.0.0
+scikit-learn==1.2.2  # Compatible with gplearn; has _validate_data but gplearn inherits it
