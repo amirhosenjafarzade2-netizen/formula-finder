@@ -326,17 +326,54 @@ n_iterations = st.sidebar.number_input("Iterations", min_value=10, value=100, he
 max_complexity = st.sidebar.number_input("Max Complexity", min_value=1, value=10, help="Max equation size")
 min_rows = st.sidebar.number_input("Min Rows", min_value=5, value=10, help="Minimum data points required")
 poly_degree = st.sidebar.number_input("Polynomial Degree", min_value=1, value=2, help="Degree for Polynomial Regression")
+
+# Available methods
+available_methods = []
+if pysr_available:
+    available_methods.append("pysr")
+available_methods.extend(["poly", "curve_fit", "symfit", "linear"])
+
+# Method choice (must come before nonlinear_model to determine options)
+method_options = {
+    "pysr": "PySR (Evolutionary Symbolic Regression)",
+    "poly": f"Polynomial Regression (Degree {poly_degree})",
+    "curve_fit": "Nonlinear Curve Fitting",
+    "symfit": "Symbolic Curve Fitting",
+    "linear": "Linear Regression"
+}
+selected_method_key = st.radio(
+    "📊 Select Method",
+    options=available_methods,
+    format_func=lambda key: method_options[key],
+    index=0,
+    help="Choose the discovery method: PySR for complex formulas, Polynomial for polynomial fits, Curve/Symbolic for specific nonlinear models, Linear for simple fits."
+)
+
+# Dynamic nonlinear model options based on selected method
+if selected_method_key == "symfit":
+    nonlinear_model_options = ["sinusoidal", "logistic", "custom"]
+    nonlinear_model_help = "Model type for Symbolic Curve Fitting (exponential not supported)."
+else:
+    nonlinear_model_options = ["exponential", "sinusoidal", "logistic", "custom"]
+    nonlinear_model_help = "Model type for Nonlinear Curve Fitting."
+
 nonlinear_model = st.sidebar.selectbox(
     "Nonlinear Model",
-    options=["exponential", "sinusoidal", "logistic", "custom"],
+    options=nonlinear_model_options,
     format_func=lambda x: x if x != "exponential" else "exponential (Nonlinear Curve Fitting only)",
-    help="Model type for Nonlinear and Symbolic Curve Fitting. Exponential is only available for Nonlinear Curve Fitting."
+    help=nonlinear_model_help
 )
+
 custom_model = st.sidebar.text_input(
     "Custom Model (sympy syntax)",
     value="",
     help="Enter a custom model, e.g., 'a * x1 + b * sin(x2) + c'. Leave blank for predefined models."
 )
+
+# Prevent exponential model for symfit (fallback check)
+if selected_method_key == "symfit" and nonlinear_model == "exponential":
+    st.error("❌ Exponential model is not supported for Symbolic Curve Fitting. Please select another model.")
+    st.stop()
 
 uploaded_files = st.file_uploader("📁 Upload Excel files", accept_multiple_files=True, type=['xlsx', 'xls'])
 n_rows_input = st.number_input("Sample rows (0 for all)", min_value=0, value=0)
@@ -367,13 +404,7 @@ if not formula_features or formula_target not in params or formula_target in for
     st.error("❌ Select valid features (excluding target).")
     st.stop()
 
-# Available methods
-available_methods = []
-if pysr_available:
-    available_methods.append("pysr")
-available_methods.extend(["poly", "curve_fit", "symfit", "linear"])
-
-# Method choice
+# Update method options to reflect current nonlinear model and poly degree
 method_options = {
     "pysr": "PySR (Evolutionary Symbolic Regression)",
     "poly": f"Polynomial Regression (Degree {poly_degree})",
@@ -381,18 +412,6 @@ method_options = {
     "symfit": f"Symbolic Curve Fitting ({nonlinear_model})",
     "linear": "Linear Regression"
 }
-selected_method_key = st.radio(
-    "📊 Select Method",
-    options=available_methods,
-    format_func=lambda key: method_options[key],
-    index=0,
-    help="Choose the discovery method: PySR for complex formulas, Polynomial for polynomial fits, Curve/Symbolic for specific nonlinear models, Linear for simple fits."
-)
-
-# Prevent exponential model for symfit
-if selected_method_key == "symfit" and nonlinear_model == "exponential":
-    st.error("❌ Exponential model is not supported for Symbolic Curve Fitting. Please select another model.")
-    st.stop()
 
 run_formula = st.button("🚀 Discover Formula", type="primary")
 
