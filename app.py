@@ -127,9 +127,9 @@ def discover_formula(
                 "target_name": target_name,
                 "is_linear": False,
                 "method": f"Polynomial Regression (Degree {poly_degree})",
-                "scaler": scaler,  # Store scaler for plotting
-                "poly": poly,      # Store poly transformer for plotting
-                "model": model     # Store model for plotting
+                "scaler": scaler,
+                "poly": poly,
+                "model": model
             }
         except Exception as e:
             raise FormulaDiscoveryError(f"Polynomial Regression failed: {e}")
@@ -203,21 +203,29 @@ def discover_formula(
     # === Symbolic Curve Fitting (symfit) ===
     if method == "symfit" and symfit_available:
         try:
-            # Define variables and parameters
+            # Define variables
             variables = {name: symfit.Variable(name) for name in feature_names}
-            params = {f'a': symfit.Parameter('a'), 'b': symfit.Parameter('b'), 'c': symfit.Parameter('c')}  # Consistent names
             y_var = symfit.Variable(target_name)
+
+            # Check for naming conflicts with feature names
+            reserved_params = {'a', 'b', 'c'}
+            if any(name in reserved_params for name in feature_names + [target_name]):
+                raise FormulaDiscoveryError("Feature or target names cannot be 'a', 'b', or 'c'.")
 
             # Define model (predefined or custom)
             if nonlinear_model == "custom" and custom_model:
                 try:
                     expr = sp.sympify(custom_model)
                     param_names = sorted([str(p) for p in expr.free_symbols if str(p) not in feature_names + [target_name]])
+                    # Check for duplicate parameters
+                    if len(param_names) != len(set(param_names)):
+                        raise FormulaDiscoveryError("Custom model contains duplicate parameter names.")
                     params = {name: symfit.Parameter(name) for name in param_names}
-                    model_dict = {y_var: sp.lambdify(list(params.values()) + list(variables.values()), expr, 'numpy')}
+                    model_dict = {y_var: expr}
                 except Exception as e:
                     raise FormulaDiscoveryError(f"Invalid custom model: {e}")
             else:
+                params = {'a': symfit.Parameter('a'), 'b': symfit.Parameter('b'), 'c': symfit.Parameter('c')}
                 x0 = variables[feature_names[0]]
                 if nonlinear_model == "exponential":
                     model_dict = {y_var: params['a'] * symfit.exp(params['b'] * x0) + params['c']}
@@ -235,7 +243,7 @@ def discover_formula(
             # Construct symbolic equation
             equation = list(model_dict.values())[0]
             param_values = {sp.Symbol(k): v for k, v in fit_result.params.items()}
-            equation = sp.sympify(equation)  # Direct conversion to sympy
+            equation = sp.sympify(equation)
             equation = equation.subs(param_values)
             complexity = len(list(sp.preorder_traversal(equation)))
             str_formula = str(sp.simplify(equation))
@@ -278,7 +286,7 @@ def discover_formula(
             "target_name": target_name,
             "is_linear": True,
             "method": "Linear Regression",
-            "model": model  # Store model for plotting
+            "model": model
         }
     raise FormulaDiscoveryError(f"Method '{method}' not available.")
 
@@ -362,7 +370,7 @@ if not formula_features or formula_target not in params or formula_target in for
 
 # Available methods
 available_methods = []
-if pysr_available:
+if pys utilize
     available_methods.append("pysr")
 available_methods.extend(["poly", "curve_fit", "symfit", "linear"])
 
