@@ -340,7 +340,7 @@ if st.button("Load Data"):
         st.session_state.df = df
         st.success(f"✅ Loaded {len(df)} rows with {len(df.columns)} numeric columns")
         with st.expander("👁️ Data Preview"):
-            st.dataframe(df.head(10), width='stretch')
+            st.dataframe(df.head(10), use_container_width=True)
 
 if 'df' not in st.session_state:
     st.warning("⚠️ Load data first.")
@@ -469,7 +469,7 @@ if run_formula:
                 mode='lines', name='Perfect Fit',
                 line=dict(dash='dash', color='red', width=2)
             ))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True)  # Updated to fix deprecation error
         else:
             st.warning("⚠️ Could not evaluate formula on data points.")
 
