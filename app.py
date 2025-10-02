@@ -1,9 +1,9 @@
 # formula_app.py
 """
 Standalone Streamlit App for Formula Discovery.
-Prioritizes gplearn (GA-based) for complex formulas, with PySR & linear fallbacks.
+Modernized with PySR (if Julia available), PhySO (GA-based symbolic regression), and linear backup.
 Run with: streamlit run formula_app.py
-Deploy tip: Add runtime.txt with 'python-3.11.9' for gplearn compatibility on Streamlit Cloud.
+Note: For Python 3.13+, gplearn may fail to build; PhySO replaces it as the GA backend.
 """
 
 import streamlit as st
@@ -13,40 +13,29 @@ import plotly.express as px
 import plotly.graph_objects as go
 import io
 import os
-import sys
 from typing import List, Dict, Any
 import sympy as sp
 from sklearn.metrics import r2_score
 from sklearn.linear_model import LinearRegression
-import warnings
 
-# Suppress deprecation warnings
-warnings.filterwarnings("ignore", category=FutureWarning)
-
-# Fix Julia env (for Streamlit Cloud, if Julia ever gets installed)
+# Fix Julia env (for Streamlit Cloud)
 os.environ['JULIA_DEPOT_PATH'] = '/tmp/julia'
 os.environ['JULIA_LOAD_PATH'] = '/tmp/julia'
 
-# Python version check
-python_version = sys.version_info
-if python_version.major == 3 and python_version.minor >= 13:
-    st.sidebar.warning("⚠️ Python 3.13 detected—gplearn may fail. Add 'runtime.txt' with 'python-3.11.9' to your repo.")
-
 # === Backend detection ===
 pysr_available = False
-gplearn_available = False
+physo_available = False
 try:
     from pysr import PySRRegressor
     pysr_available = True
-except Exception as e:
-    st.sidebar.info(f"PySR unavailable ({e})—requires Julia.")
+except Exception:
+    pass
+
 try:
-    from gplearn.genetic import SymbolicRegressor
-    gplearn_available = True
-except Exception as e:
-    st.sidebar.warning(f"gplearn unavailable ({e})—check sklearn pin in requirements.txt.")
-    if "sklearn" in str(e).lower():
-        st.sidebar.error("💥 Fix: Pin scikit-learn==1.2.2 in requirements.txt.")
+    import physo
+    physo_available = True
+except Exception:
+    pass
 
 linear_available = True  # Always available
 
@@ -62,58 +51,13 @@ def discover_formula(
     max_complexity: int = 10,
     n_iterations: int = 100,
     target_name: str = "y",
-    method: str = "gplearn"  # Default to GA: 'pysr', 'gplearn', 'linear'
+    method: str = "pysr"  # 'pysr', 'physo', 'linear'
 ) -> Dict[str, Any]:
     X_arr = X.values.astype(np.float64)
     y_arr = y.values.astype(np.float64)
 
     if len(X_arr) == 0 or np.any(np.isnan(X_arr)) or np.any(np.isnan(y_arr)):
         raise FormulaDiscoveryError("Invalid data: NaNs or empty.")
-
-    # === gplearn (Genetic Algorithm Symbolic Regression) - Primary GA Method ===
-    if method == "gplearn" and gplearn_available:
-        try:
-            np.random.seed(42)  # Reproducibility
-            model = SymbolicRegressor(
-                generations=int(n_iterations / 10),
-                population_size=1000,
-                function_set=['add', 'sub', 'mul', 'div', 'sin', 'cos', 'sqrt', 'log', 'exp'],
-                parsimony_coefficient=0.001,
-                max_samples=1.0,
-                verbose=0,
-                random_state=42,
-                parsimony_decay=0.9,  # Gradual complexity penalty
-                metric='mean absolute error'  # Robust to outliers
-            )
-            model.fit(X_arr, y_arr)
-            y_pred = model.predict(X_arr)
-            score = r2_score(y_arr, y_pred)
-
-            str_formula = model._program.__str__()
-            # Replace X0, X1, … with actual feature names
-            for i, name in enumerate(feature_names):
-                str_formula = str_formula.replace(f"X{i}", name)
-            try:
-                equation = sp.sympify(str_formula)
-            except Exception:
-                equation = sp.Symbol(str_formula)
-
-            # Better complexity: Count operators + variables
-            complexity = len(str_formula.replace(' ', '').replace('(', '').replace(')', '')) // 2  # Rough token count
-
-            return {
-                "equation": equation,
-                "str_formula": str_formula,
-                "score": float(score),
-                "complexity": int(complexity),
-                "feature_names": feature_names,
-                "target_name": target_name,
-                "is_linear": False,
-                "method": "gplearn (Genetic Algorithm)"
-            }
-        except Exception as e:
-            st.warning(f"⚠️ gplearn failed ({e})—falling back to linear.")
-            method = "linear"  # Auto-fallback
 
     # === PySR (Evolutionary Symbolic Regression) ===
     if method == "pysr" and pysr_available:
@@ -153,6 +97,76 @@ def discover_formula(
             }
         except Exception as e:
             raise FormulaDiscoveryError(f"PySR failed: {e}")
+
+    # === PhySO (Physics-Oriented Symbolic Regression, GA-based) ===
+    if method == "physo" and physo_available:
+        try:
+            import physo
+            import torch
+
+            # Seed for reproducibility
+            seed = 42
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+
+            # Prepare data as torch tensors
+            X_torch = torch.from_numpy(X_arr.T).float()  # PhySO expects features as rows (n_features x n_samples)
+            y_torch = torch.from_numpy(y_arr).float().unsqueeze(1)
+
+            # Dummy units (since no physical constraints)
+            X_units = [[1, 0, 0] for _ in feature_names]  # [kg, m, s] dummy
+            y_units = [1, 0, 0]
+
+            # Run SR with corrected config
+            expression, logs = physo.SR(
+                X_torch, y_torch,
+                X_names=feature_names,
+                X_units=X_units,
+                y_name=target_name,
+                y_units=y_units,
+                op_names=["add", "mul", "sub", "div", "sin", "cos", "exp", "log", "sqrt", "neg"],
+                run_config=physo.config.config0.config0,  # Fixed: use config0.config0 instead of get("config0")
+                parallel_mode=False,
+                epochs=n_iterations // 5,  # Adjust epochs based on iterations (e.g., 20 for 100)
+                show_progress=False
+            )
+
+            # Get best expression (assuming expression is the top one)
+            best_expr = expression[0] if isinstance(expression, list) else expression
+            str_formula = best_expr.get_infix()
+            sympy_expr = best_expr.get_infix_sympy()
+            equation = sympy_expr[0] if isinstance(sympy_expr, tuple) else sympy_expr
+
+            # Evaluate predictions using sympy
+            y_pred_list = []
+            for i in range(len(X_arr)):
+                row_dict = {sp.Symbol(name): float(X_arr[i, j]) for j, name in enumerate(feature_names)}
+                try:
+                    pred_val = float(equation.subs(row_dict).evalf())
+                    y_pred_list.append(pred_val)
+                except:
+                    y_pred_list.append(np.nan)
+            y_pred = np.array(y_pred_list)
+            mask_valid = ~np.isnan(y_pred)
+            if mask_valid.sum() > 0:
+                score = r2_score(y_arr[mask_valid], y_pred[mask_valid])
+            else:
+                score = 0.0
+
+            complexity = best_expr.complexity
+
+            return {
+                "equation": equation,
+                "str_formula": str_formula,
+                "score": float(score),
+                "complexity": int(complexity),
+                "feature_names": feature_names,
+                "target_name": target_name,
+                "is_linear": False,
+                "method": "PhySO (GA-based)"
+            }
+        except Exception as e:
+            raise FormulaDiscoveryError(f"PhySO failed: {e}")
 
     # === Linear fallback ===
     if method == "linear" and linear_available:
@@ -215,8 +229,8 @@ st.set_page_config(page_title="Formula Discovery App", layout="wide")
 st.title("🧮 Standalone Formula Discovery App")
 
 st.sidebar.header("⚙️ Config")
-n_iterations = st.sidebar.number_input("Iterations", min_value=10, value=100, help="Number of search iterations (higher = better complex formulas)")
-max_complexity = st.sidebar.number_input("Max Complexity", min_value=1, value=10, help="Max equation size (higher allows exp/trig nests)")
+n_iterations = st.sidebar.number_input("Iterations", min_value=10, value=100, help="Number of search iterations")
+max_complexity = st.sidebar.number_input("Max Complexity", min_value=1, value=10, help="Max equation size")
 min_rows = st.sidebar.number_input("Min Rows", min_value=5, value=10, help="Minimum data points required")
 
 uploaded_files = st.file_uploader("📁 Upload Excel files", accept_multiple_files=True, type=['xlsx', 'xls'])
@@ -248,24 +262,26 @@ if not formula_features or formula_target not in params or formula_target in for
     st.error("❌ Select valid features (excluding target).")
     st.stop()
 
-# Available methods (prioritize gplearn)
-available_methods = ["gplearn"] if gplearn_available else []
+# Available methods
+available_methods = []
 if pysr_available:
     available_methods.append("pysr")
+if physo_available:
+    available_methods.append("physo")
 available_methods.append("linear")
 
 # Method choice
 method_options = {
-    "gplearn": "gplearn (Genetic Algorithm) - For complex nonlinear formulas",
-    "pysr": "PySR (Evolutionary) - Fast alternative if Julia available",
-    "linear": "Linear Regression - Quick/simple fits"
+    "pysr": "PySR (Evolutionary Symbolic Regression)",
+    "physo": "PhySO (GA-based Symbolic Regression)",
+    "linear": "Linear Regression"
 }
 selected_method_key = st.radio(
     "📊 Select Method",
     options=available_methods,
     format_func=lambda key: method_options[key],
     index=0,
-    help="GA/Evolutionary for exp/power/trig/multiplications; Linear for basics."
+    help="Choose the discovery method: Evolutionary/GA for nonlinear (complex formulas with exp, trig, etc.), Linear for simple fits."
 )
 
 run_formula = st.button("🚀 Discover Formula", type="primary")
@@ -302,8 +318,8 @@ if run_formula:
         progress_bar.progress(0.8)
         status_text.text("📈 Generating visualization...")
 
-        is_linear_msg = " (Linear Fallback)" if formula_result.get("is_linear") else ""
-        st.success(f"✅ Formula discovered with {formula_result['method']}{is_linear_msg}!")
+        fallback_msg = " (Linear Approximation)" if formula_result.get("is_linear") else ""
+        st.success(f"✅ Formula discovered with {formula_result['method']}{fallback_msg}!")
 
         col_res1, col_res2 = st.columns(2)
         with col_res1:
@@ -324,7 +340,6 @@ if run_formula:
             st.write(f"**Target:** {formula_result['target_name']}")
             st.write(f"**Features Used:** {', '.join(formula_result['feature_names'])}")
 
-        # Prediction eval (shared)
         equation = formula_result['equation']
         y_pred = []
         for idx in range(len(X_formula)):
