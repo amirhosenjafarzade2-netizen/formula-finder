@@ -126,7 +126,10 @@ def discover_formula(
                 "feature_names": feature_names,
                 "target_name": target_name,
                 "is_linear": False,
-                "method": f"Polynomial Regression (Degree {poly_degree})"
+                "method": f"Polynomial Regression (Degree {poly_degree})",
+                "scaler": scaler,  # Store scaler for plotting
+                "poly": poly,      # Store poly transformer for plotting
+                "model": model     # Store model for plotting
             }
         except Exception as e:
             raise FormulaDiscoveryError(f"Polynomial Regression failed: {e}")
@@ -202,7 +205,7 @@ def discover_formula(
         try:
             # Define variables and parameters
             variables = {name: symfit.Variable(name) for name in feature_names}
-            params = {f'p{i}': symfit.Parameter(f'p{i}') for i in range(3)}  # Example: 3 parameters
+            params = {f'a': symfit.Parameter('a'), 'b': symfit.Parameter('b'), 'c': symfit.Parameter('c')}  # Consistent names
             y_var = symfit.Variable(target_name)
 
             # Define model (predefined or custom)
@@ -211,18 +214,17 @@ def discover_formula(
                     expr = sp.sympify(custom_model)
                     param_names = sorted([str(p) for p in expr.free_symbols if str(p) not in feature_names + [target_name]])
                     params = {name: symfit.Parameter(name) for name in param_names}
-                    model = sp.lambdify(list(params.values()) + list(variables.values()), expr, 'numpy')
-                    model_dict = {y_var: model}
+                    model_dict = {y_var: sp.lambdify(list(params.values()) + list(variables.values()), expr, 'numpy')}
                 except Exception as e:
                     raise FormulaDiscoveryError(f"Invalid custom model: {e}")
             else:
                 x0 = variables[feature_names[0]]
                 if nonlinear_model == "exponential":
-                    model_dict = {y_var: params['p0'] * symfit.exp(params['p1'] * x0) + params['p2']}
+                    model_dict = {y_var: params['a'] * symfit.exp(params['b'] * x0) + params['c']}
                 elif nonlinear_model == "sinusoidal":
-                    model_dict = {y_var: params['p0'] * symfit.sin(params['p1'] * x0) + params['p2']}
+                    model_dict = {y_var: params['a'] * symfit.sin(params['b'] * x0) + params['c']}
                 elif nonlinear_model == "logistic":
-                    model_dict = {y_var: params['p0'] / (1 + symfit.exp(-params['p1'] * (x0 - params['p2'])))}
+                    model_dict = {y_var: params['a'] / (1 + symfit.exp(-params['b'] * (x0 - params['c'])))}
                 else:
                     raise FormulaDiscoveryError(f"Unknown model: {nonlinear_model}")
 
@@ -231,16 +233,15 @@ def discover_formula(
             fit_result = fit.execute(maxiter=n_iterations * 100)
 
             # Construct symbolic equation
-            param_values = {sp.Symbol(k): v for k, v in fit_result.params.items()}
             equation = list(model_dict.values())[0]
-            equation = sp.sympify(str(equation).replace('Variable', '').replace('Parameter', ''))
+            param_values = {sp.Symbol(k): v for k, v in fit_result.params.items()}
+            equation = sp.sympify(equation)  # Direct conversion to sympy
             equation = equation.subs(param_values)
             complexity = len(list(sp.preorder_traversal(equation)))
             str_formula = str(sp.simplify(equation))
 
             # Predict for scoring
-            X_dict = {name: X_arr[:, i] for i, name in enumerate(feature_names)}
-            y_pred = fit.model(**X_dict, **fit_result.params).y
+            y_pred = fit.model(**{name: X_arr[:, i] for i, name in enumerate(feature_names)}, **fit_result.params).y
             score = r2_score(y_arr, y_pred)
 
             return {
@@ -276,9 +277,9 @@ def discover_formula(
             "feature_names": feature_names,
             "target_name": target_name,
             "is_linear": True,
-            "method": "Linear Regression"
+            "method": "Linear Regression",
+            "model": model  # Store model for plotting
         }
-
     raise FormulaDiscoveryError(f"Method '{method}' not available.")
 
 def load_and_preprocess_data(uploaded_files, n_rows=None):
@@ -440,18 +441,29 @@ if run_formula:
             st.write(f"**Target:** {formula_result['target_name']}")
             st.write(f"**Features Used:** {', '.join(formula_result['feature_names'])}")
 
-        equation = formula_result['equation']
-        y_pred = []
-        for idx in range(len(X_formula)):
-            row = X_formula.iloc[idx]
-            val_dict = {sp.Symbol(name): float(row[name]) for name in formula_features}
-            try:
-                pred_val = float(equation.subs(val_dict).evalf())
-                y_pred.append(pred_val)
-            except Exception:
-                y_pred.append(np.nan)
+        # Compute predictions for plotting
+        if selected_method_key == "poly":
+            # Use the fitted model for polynomial regression
+            scaler = formula_result.get("scaler")
+            poly = formula_result.get("poly")
+            model = formula_result.get("model")
+            X_scaled = scaler.transform(X_formula.values)
+            X_poly = poly.transform(X_scaled)
+            y_pred = model.predict(X_poly)
+        else:
+            # Use sympy evaluation for other methods
+            equation = formula_result['equation']
+            y_pred = []
+            for idx in range(len(X_formula)):
+                row = X_formula.iloc[idx]
+                val_dict = {sp.Symbol(name): float(row[name]) for name in formula_features}
+                try:
+                    pred_val = float(equation.subs(val_dict).evalf())
+                    y_pred.append(pred_val)
+                except Exception:
+                    y_pred.append(np.nan)
+            y_pred = np.array(y_pred)
 
-        y_pred = np.array(y_pred)
         mask_valid = ~np.isnan(y_pred)
         if mask_valid.sum() > 0:
             y_actual_valid = y_formula.values[mask_valid]
@@ -469,7 +481,7 @@ if run_formula:
                 mode='lines', name='Perfect Fit',
                 line=dict(dash='dash', color='red', width=2)
             ))
-            st.plotly_chart(fig, use_container_width=True)  # Updated to fix deprecation error
+            st.plotly_chart(fig, use_container_width=True)
         else:
             st.warning("⚠️ Could not evaluate formula on data points.")
 
