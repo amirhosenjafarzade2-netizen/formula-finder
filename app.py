@@ -469,7 +469,7 @@ if run_formula:
                 mode='lines', name='Perfect Fit',
                 line=dict(dash='dash', color='red', width=2)
             ))
-            st.plotly_chart(fig, width='stretch')
+            st.plotly_chart(fig, use_container_width=True)
         else:
             st.warning("⚠️ Could not evaluate formula on data points.")
 
