@@ -1,4 +1,3 @@
-```python
 """
 Standalone Streamlit App for Formula Discovery.
 Modernized with PySR (if Julia available), PhySO (GA-based symbolic regression), and linear backup.
