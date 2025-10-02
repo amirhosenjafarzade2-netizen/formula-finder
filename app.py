@@ -1,7 +1,7 @@
 # formula_app.py
 """
 Standalone Streamlit App for Formula Discovery.
-Isolated from main dashboard. Uses PySR for modern symbolic regression (if selected).
+Modernized with PySR (if Julia available), gplearn fallback, and linear backup.
 Run with: streamlit run formula_app.py
 """
 
@@ -15,25 +15,28 @@ import os
 from typing import List, Dict, Any
 import sympy as sp
 from sklearn.metrics import r2_score
-from sklearn.linear_model import LinearRegression  # For linear fallback
+from sklearn.linear_model import LinearRegression
 
-# Attempt to fix PySR Julia env permissions on Streamlit Cloud
+# Fix Julia env (for Streamlit Cloud)
 os.environ['JULIA_DEPOT_PATH'] = '/tmp/julia'
 os.environ['JULIA_LOAD_PATH'] = '/tmp/julia'
 
-# PySR import with fallback
-PYSR_AVAILABLE = False
+# === Backend detection ===
+BACKEND = None
 try:
     from pysr import PySRRegressor
-    PYSR_AVAILABLE = True
-except (ImportError, Exception) as e:
-    if 'Permission denied' in str(e):
-        st.warning("PySR Julia env permission issue detected; symbolic method unavailable. Use linear or run locally.")
-    else:
-        st.warning(f"PySR unavailable ({e}); symbolic method unavailable.")
+    BACKEND = "pysr"
+except Exception:
+    try:
+        from gplearn.genetic import SymbolicRegressor
+        BACKEND = "gplearn"
+    except Exception:
+        BACKEND = "linear"
+
 
 class FormulaDiscoveryError(Exception):
     pass
+
 
 def discover_formula(
     X: pd.DataFrame,
@@ -44,14 +47,14 @@ def discover_formula(
     target_name: str = "y",
     use_symbolic: bool = True
 ) -> Dict[str, Any]:
-    """Discover formula using PySR (if requested and available) or linear fallback."""
     X_arr = X.values.astype(np.float64)
     y_arr = y.values.astype(np.float64)
 
     if len(X_arr) == 0 or np.any(np.isnan(X_arr)) or np.any(np.isnan(y_arr)):
         raise FormulaDiscoveryError("Invalid data: NaNs or empty.")
 
-    if use_symbolic and PYSR_AVAILABLE:
+    # === PySR ===
+    if use_symbolic and BACKEND == "pysr":
         try:
             model = PySRRegressor(
                 niterations=n_iterations,
@@ -68,8 +71,7 @@ def discover_formula(
             y_pred = model.predict(X_arr)
             score = r2_score(y_arr, y_pred)
 
-            # Extract SymPy equation
-            equation_str = model.sympy()
+            equation_str = str(model.sympy())
             equation = sp.sympify(equation_str)
             complexity = len(list(sp.preorder_traversal(equation)))
 
@@ -87,38 +89,69 @@ def discover_formula(
                 "is_linear": False
             }
         except Exception as e:
-            if 'Permission denied' in str(e):
-                st.warning("PySR Julia setup failed due to permissions; switching to linear.")
-            else:
-                st.warning(f"Symbolic discovery failed ({e}); using linear fallback.")
-            use_symbolic = False  # Force fallback
+            st.warning(f"⚠️ PySR failed ({e}), switching fallback…")
 
-    # Linear fallback (always available)
+    # === gplearn fallback ===
+    if use_symbolic and BACKEND == "gplearn":
+        try:
+            from gplearn.genetic import SymbolicRegressor
+            model = SymbolicRegressor(
+                generations=int(n_iterations / 10),
+                population_size=1000,
+                hall_of_fame=1,
+                n_components=1,
+                function_set=['add', 'sub', 'mul', 'div', 'sin', 'cos', 'sqrt', 'log'],
+                parsimony_coefficient=0.001,
+                max_samples=1.0,
+                verbose=0,
+                random_state=42
+            )
+            model.fit(X_arr, y_arr)
+            y_pred = model.predict(X_arr)
+            score = r2_score(y_arr, y_pred)
+
+            str_formula = model._program.__str__()
+            # Replace X0, X1, … with actual feature names
+            for i, name in enumerate(feature_names):
+                str_formula = str_formula.replace(f"X{i}", name)
+            equation = sp.sympify(str_formula)
+
+            return {
+                "equation": equation,
+                "str_formula": str_formula,
+                "score": float(score),
+                "complexity": len(str_formula),
+                "feature_names": feature_names,
+                "target_name": target_name,
+                "is_linear": False
+            }
+        except Exception as e:
+            st.warning(f"⚠️ gplearn failed ({e}), switching to linear…")
+
+    # === Linear fallback ===
     model = LinearRegression()
     model.fit(X_arr, y_arr)
     y_pred = model.predict(X_arr)
     score = r2_score(y_arr, y_pred)
 
-    # Build SymPy linear equation
     coeffs = model.coef_
     intercept = model.intercept_
     terms = [sp.Float(coeff) * sp.Symbol(name) for name, coeff in zip(feature_names, coeffs)]
     equation = sum(terms) + sp.Float(intercept)
-    str_formula = str(sp.simplify(equation))
-    complexity = len(feature_names) + 1  # Basic count
 
     return {
         "equation": equation,
-        "str_formula": str_formula,
+        "str_formula": str(equation),
         "score": float(score),
-        "complexity": int(complexity),
+        "complexity": len(feature_names) + 1,
         "feature_names": feature_names,
         "target_name": target_name,
         "is_linear": True
     }
 
+
 def load_and_preprocess_data(uploaded_files, n_rows=None):
-    """Simple data loader."""
+    """Load numeric Excel data or generate sample."""
     if not uploaded_files:
         st.info("Using sample data.")
         rng = np.random.default_rng(42)
@@ -126,13 +159,12 @@ def load_and_preprocess_data(uploaded_files, n_rows=None):
             'Feature1': rng.normal(1.2, 0.05, 100),
             'Feature2': rng.normal(500, 50, 100),
             'Feature3': rng.normal(30, 2, 100),
-            'Target': 2 * rng.normal(1.2, 0.05, 100) + np.sin(rng.normal(30, 2, 100))  # For testing
+            'Target': 2 * rng.normal(1.2, 0.05, 100) + np.sin(rng.normal(30, 2, 100))
         })
         return df
 
     dfs = []
     for uploaded_file in uploaded_files:
-        # Reset file pointer
         uploaded_file.seek(0)
         df_temp = pd.read_excel(io.BytesIO(uploaded_file.read()), engine='openpyxl')
         numeric_cols = df_temp.select_dtypes(include=[np.number]).columns.tolist()
@@ -146,18 +178,17 @@ def load_and_preprocess_data(uploaded_files, n_rows=None):
         return pd.concat(dfs, ignore_index=True)
     return pd.DataFrame()
 
+
+# === Streamlit UI ===
 st.set_page_config(page_title="Formula Discovery App", layout="wide")
 
 st.title("🧮 Standalone Formula Discovery App")
 
-# Sidebar config
 st.sidebar.header("⚙️ Config")
-n_iterations = st.sidebar.number_input("Iterations", min_value=10, value=100, help="Number of search iterations (for symbolic)")
-max_complexity = st.sidebar.number_input("Max Complexity", min_value=1, value=10, help="Max equation size (for symbolic)")
-
+n_iterations = st.sidebar.number_input("Iterations", min_value=10, value=100, help="Number of search iterations")
+max_complexity = st.sidebar.number_input("Max Complexity", min_value=1, value=10, help="Max equation size")
 min_rows = st.sidebar.number_input("Min Rows", min_value=5, value=10, help="Minimum data points required")
 
-# File upload
 uploaded_files = st.file_uploader("📁 Upload Excel files", accept_multiple_files=True, type=['xlsx', 'xls'])
 n_rows_input = st.number_input("Sample rows (0 for all)", min_value=0, value=0)
 n_rows = None if n_rows_input == 0 else n_rows_input
@@ -187,17 +218,17 @@ if not formula_features or formula_target not in params or formula_target in for
     st.error("❌ Select valid features (excluding target).")
     st.stop()
 
-# User choice for method
+# Method choice
 method_choice = st.radio(
     "📊 Method",
-    options=["Symbolic (PySR - recommended, if available)", "Linear Only"],
-    index=0 if PYSR_AVAILABLE else 1,
-    help="Symbolic: Tries to find complex equations. Linear: Fast, simple approximation."
+    options=["Best Available (Symbolic if possible)", "Linear Only"],
+    index=0 if BACKEND != "linear" else 1,
+    help="Symbolic: nonlinear discovery (PySR/gplearn). Linear: simple regression."
 )
-use_symbolic = (method_choice == "Symbolic (PySR - recommended, if available)")
+use_symbolic = (method_choice == "Best Available (Symbolic if possible)")
 
-if not PYSR_AVAILABLE and use_symbolic:
-    st.warning("⚠️ Symbolic method unavailable (PySR issue). Switching to linear.")
+if BACKEND == "linear" and use_symbolic:
+    st.warning("⚠️ No symbolic backend available, using linear only.")
     use_symbolic = False
 
 run_formula = st.button("🚀 Discover Formula", type="primary")
@@ -234,38 +265,29 @@ if run_formula:
         progress_bar.progress(0.8)
         status_text.text("📈 Generating visualization...")
 
-        # Enhanced Results Display
         fallback_msg = " (Linear Approximation)" if formula_result.get("is_linear") else ""
         st.success(f"✅ Formula discovered{fallback_msg}!")
 
-        # Metrics with better layout
         col_res1, col_res2 = st.columns(2)
         with col_res1:
-            st.metric("📊 R² Score", f"{formula_result['score']:.4f}", delta=None, help="Model fit quality (1.0 = perfect)")
+            st.metric("📊 R² Score", f"{formula_result['score']:.4f}")
         with col_res2:
-            st.metric("🔢 Complexity", formula_result['complexity'], delta=None, help="Equation simplicity (lower = better)")
+            st.metric("🔢 Complexity", formula_result['complexity'])
 
-        # Beautiful Formula Display
         st.subheader("📜 Discovered Formula")
         formula_type = "Linear Model" if formula_result.get("is_linear") else "Symbolic Expression"
         st.info(f"**Type:** {formula_type}")
-        
-        # Render with LaTeX for beauty
+
         latex_formula = sp.latex(formula_result['equation'])
         st.latex(latex_formula)
-        
-        # Plain text fallback for readability
+
         with st.expander("🔤 Plain Text Version"):
             st.code(formula_result['str_formula'], language='text')
-        
-        # Explanation expander
+
         with st.expander("ℹ️ Details"):
             st.write(f"**Target:** {formula_result['target_name']}")
             st.write(f"**Features Used:** {', '.join(formula_result['feature_names'])}")
-            if formula_result.get("is_linear"):
-                st.info("💡 This is a linear model: y = a*x1 + b*x2 + ... + c. For non-linear/symbolic, try local run or check PySR setup.")
 
-        # Enhanced Plot (no trendline to avoid statsmodels)
         equation = formula_result['equation']
         y_pred = []
         for idx in range(len(X_formula)):
@@ -287,7 +309,6 @@ if run_formula:
                 x=y_actual_valid, y=y_pred_valid,
                 labels={'x': f'Actual {formula_target}', 'y': f'Predicted {formula_target}'},
                 title=f'Predictions vs. Actual Values ({formula_type})',
-                # Removed trendline="ols" to avoid statsmodels dep
             )
             min_val = min(y_actual_valid.min(), y_pred_valid.min())
             max_val = max(y_actual_valid.max(), y_pred_valid.max())
@@ -296,12 +317,10 @@ if run_formula:
                 mode='lines', name='Perfect Fit',
                 line=dict(dash='dash', color='red', width=2)
             ))
-            fig.update_layout(height=500, showlegend=True)
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.warning("⚠️ Could not evaluate formula on data points.")
 
-        # Download with enhanced text
         formula_text = f"""Formula Discovery Results
 ===================
 
@@ -320,8 +339,7 @@ Plain Text:
             "💾 Download Report", 
             formula_text, 
             f"formula_report_{formula_target}.txt", 
-            "text/plain",
-            help="Download full results as text file"
+            "text/plain"
         )
 
         progress_bar.progress(1.0)
