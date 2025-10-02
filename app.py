@@ -1,7 +1,7 @@
 # formula_app.py
 """
 Standalone Streamlit App for Formula Discovery.
-Isolated from main dashboard. Uses PySR for modern symbolic regression.
+Isolated from main dashboard. Uses PySR for modern symbolic regression (if selected).
 Run with: streamlit run formula_app.py
 """
 
@@ -15,10 +15,11 @@ import os
 from typing import List, Dict, Any
 import sympy as sp
 from sklearn.metrics import r2_score
-from sklearn.linear_model import LinearRegression  # Fallback
+from sklearn.linear_model import LinearRegression  # For linear fallback
 
-# Fix for PySR Julia env permissions on Streamlit Cloud
+# Attempt to fix PySR Julia env permissions on Streamlit Cloud
 os.environ['JULIA_DEPOT_PATH'] = '/tmp/julia'
+os.environ['JULIA_LOAD_PATH'] = '/tmp/julia'
 
 # PySR import with fallback
 PYSR_AVAILABLE = False
@@ -27,9 +28,9 @@ try:
     PYSR_AVAILABLE = True
 except (ImportError, Exception) as e:
     if 'Permission denied' in str(e):
-        st.warning("PySR Julia env permission issue detected; using linear fallback. Try rebooting the app.")
+        st.warning("PySR Julia env permission issue detected; symbolic method unavailable. Use linear or run locally.")
     else:
-        st.warning(f"PySR unavailable ({e}); using linear fallback.")
+        st.warning(f"PySR unavailable ({e}); symbolic method unavailable.")
 
 class FormulaDiscoveryError(Exception):
     pass
@@ -40,16 +41,17 @@ def discover_formula(
     feature_names: List[str],
     max_complexity: int = 10,
     n_iterations: int = 100,
-    target_name: str = "y"
+    target_name: str = "y",
+    use_symbolic: bool = True
 ) -> Dict[str, Any]:
-    """Discover formula using PySR (or linear fallback)."""
+    """Discover formula using PySR (if requested and available) or linear fallback."""
     X_arr = X.values.astype(np.float64)
     y_arr = y.values.astype(np.float64)
 
     if len(X_arr) == 0 or np.any(np.isnan(X_arr)) or np.any(np.isnan(y_arr)):
         raise FormulaDiscoveryError("Invalid data: NaNs or empty.")
 
-    if PYSR_AVAILABLE:
+    if use_symbolic and PYSR_AVAILABLE:
         try:
             model = PySRRegressor(
                 niterations=n_iterations,
@@ -86,12 +88,12 @@ def discover_formula(
             }
         except Exception as e:
             if 'Permission denied' in str(e):
-                st.warning("PySR Julia setup failed due to permissions; using linear fallback.")
+                st.warning("PySR Julia setup failed due to permissions; switching to linear.")
             else:
-                st.warning(f"PySR failed ({e}); using linear fallback.")
-            # Fall through to linear
+                st.warning(f"Symbolic discovery failed ({e}); using linear fallback.")
+            use_symbolic = False  # Force fallback
 
-    # Fallback: Simple linear regression + SymPy expression
+    # Linear fallback (always available)
     model = LinearRegression()
     model.fit(X_arr, y_arr)
     y_pred = model.predict(X_arr)
@@ -100,8 +102,8 @@ def discover_formula(
     # Build SymPy linear equation
     coeffs = model.coef_
     intercept = model.intercept_
-    terms = [sp.Symbol(name) * coeff for name, coeff in zip(feature_names, coeffs)]
-    equation = sum(terms) + intercept
+    terms = [sp.Float(coeff) * sp.Symbol(name) for name, coeff in zip(feature_names, coeffs)]
+    equation = sum(terms) + sp.Float(intercept)
     str_formula = str(sp.simplify(equation))
     complexity = len(feature_names) + 1  # Basic count
 
@@ -150,8 +152,9 @@ st.title("🧮 Standalone Formula Discovery App")
 
 # Sidebar config
 st.sidebar.header("⚙️ Config")
-n_iterations = st.sidebar.number_input("Iterations", min_value=10, value=100, help="Number of search iterations")
-max_complexity = st.sidebar.number_input("Max Complexity", min_value=1, value=10, help="Max equation size")
+n_iterations = st.sidebar.number_input("Iterations", min_value=10, value=100, help="Number of search iterations (for symbolic)")
+max_complexity = st.sidebar.number_input("Max Complexity", min_value=1, value=10, help="Max equation size (for symbolic)")
+
 min_rows = st.sidebar.number_input("Min Rows", min_value=5, value=10, help="Minimum data points required")
 
 # File upload
@@ -184,6 +187,19 @@ if not formula_features or formula_target not in params or formula_target in for
     st.error("❌ Select valid features (excluding target).")
     st.stop()
 
+# User choice for method
+method_choice = st.radio(
+    "📊 Method",
+    options=["Symbolic (PySR - recommended, if available)", "Linear Only"],
+    index=0 if PYSR_AVAILABLE else 1,
+    help="Symbolic: Tries to find complex equations. Linear: Fast, simple approximation."
+)
+use_symbolic = (method_choice == "Symbolic (PySR - recommended, if available)")
+
+if not PYSR_AVAILABLE and use_symbolic:
+    st.warning("⚠️ Symbolic method unavailable (PySR issue). Switching to linear.")
+    use_symbolic = False
+
 run_formula = st.button("🚀 Discover Formula", type="primary")
 
 if run_formula:
@@ -205,13 +221,14 @@ if run_formula:
             raise FormulaDiscoveryError(f"Insufficient valid data: {len(X_formula)} rows (need ≥{min_rows})")
 
         progress_bar.progress(0.4)
-        status_text.text("🔍 Running symbolic regression...")
+        status_text.text("🔍 Running discovery...")
 
         formula_result = discover_formula(
             X_formula, y_formula, formula_features,
             max_complexity=max_complexity,
             n_iterations=n_iterations,
-            target_name=formula_target
+            target_name=formula_target,
+            use_symbolic=use_symbolic
         )
 
         progress_bar.progress(0.8)
@@ -246,9 +263,9 @@ if run_formula:
             st.write(f"**Target:** {formula_result['target_name']}")
             st.write(f"**Features Used:** {', '.join(formula_result['feature_names'])}")
             if formula_result.get("is_linear"):
-                st.warning("💡 This is a linear fallback due to PySR setup issues. For full symbolic discovery, run locally or reboot the app.")
+                st.info("💡 This is a linear model: y = a*x1 + b*x2 + ... + c. For non-linear/symbolic, try local run or check PySR setup.")
 
-        # Enhanced Plot
+        # Enhanced Plot (no trendline to avoid statsmodels)
         equation = formula_result['equation']
         y_pred = []
         for idx in range(len(X_formula)):
@@ -270,7 +287,7 @@ if run_formula:
                 x=y_actual_valid, y=y_pred_valid,
                 labels={'x': f'Actual {formula_target}', 'y': f'Predicted {formula_target}'},
                 title=f'Predictions vs. Actual Values ({formula_type})',
-                trendline="ols" if formula_result.get("is_linear") else None
+                # Removed trendline="ols" to avoid statsmodels dep
             )
             min_val = min(y_actual_valid.min(), y_pred_valid.min())
             max_val = max(y_actual_valid.max(), y_pred_valid.max())
