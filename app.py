@@ -1,7 +1,7 @@
 # formula_app.py
 """
 Standalone Streamlit App for Formula Discovery.
-Modernized with PySR (if Julia available), gplearn fallback, and linear backup.
+Modernized with PySR (if Julia available), gplearn fallback (GA-based), and linear backup.
 Run with: streamlit run formula_app.py
 """
 
@@ -22,16 +22,21 @@ os.environ['JULIA_DEPOT_PATH'] = '/tmp/julia'
 os.environ['JULIA_LOAD_PATH'] = '/tmp/julia'
 
 # === Backend detection ===
-BACKEND = None
+pysr_available = False
+gplearn_available = False
 try:
     from pysr import PySRRegressor
-    BACKEND = "pysr"
+    pysr_available = True
 except Exception:
-    try:
-        from gplearn.genetic import SymbolicRegressor
-        BACKEND = "gplearn"
-    except Exception:
-        BACKEND = "linear"
+    pass
+
+try:
+    from gplearn.genetic import SymbolicRegressor
+    gplearn_available = True
+except Exception:
+    pass
+
+linear_available = True  # Always available
 
 
 class FormulaDiscoveryError(Exception):
@@ -45,7 +50,7 @@ def discover_formula(
     max_complexity: int = 10,
     n_iterations: int = 100,
     target_name: str = "y",
-    use_symbolic: bool = True
+    method: str = "pysr"  # 'pysr', 'gplearn', 'linear'
 ) -> Dict[str, Any]:
     X_arr = X.values.astype(np.float64)
     y_arr = y.values.astype(np.float64)
@@ -53,8 +58,8 @@ def discover_formula(
     if len(X_arr) == 0 or np.any(np.isnan(X_arr)) or np.any(np.isnan(y_arr)):
         raise FormulaDiscoveryError("Invalid data: NaNs or empty.")
 
-    # === PySR ===
-    if use_symbolic and BACKEND == "pysr":
+    # === PySR (Evolutionary Symbolic Regression) ===
+    if method == "pysr" and pysr_available:
         try:
             model = PySRRegressor(
                 niterations=n_iterations,
@@ -86,18 +91,19 @@ def discover_formula(
                 "complexity": int(complexity),
                 "feature_names": feature_names,
                 "target_name": target_name,
-                "is_linear": False
+                "is_linear": False,
+                "method": "PySR (Evolutionary)"
             }
         except Exception as e:
-            st.warning(f"⚠️ PySR failed ({e}), switching fallback…")
+            raise FormulaDiscoveryError(f"PySR failed: {e}")
 
-    # === gplearn fallback ===
-    if use_symbolic and BACKEND == "gplearn":
+    # === gplearn (Genetic Algorithm Symbolic Regression) ===
+    if method == "gplearn" and gplearn_available:
         try:
             model = SymbolicRegressor(
                 generations=int(n_iterations / 10),
                 population_size=1000,
-                function_set=['add', 'sub', 'mul', 'div', 'sin', 'cos', 'sqrt', 'log'],
+                function_set=['add', 'sub', 'mul', 'div', 'sin', 'cos', 'sqrt', 'log', 'exp'],
                 parsimony_coefficient=0.001,
                 max_samples=1.0,
                 verbose=0,
@@ -116,38 +122,45 @@ def discover_formula(
             except Exception:
                 equation = sp.Symbol(str_formula)
 
+            complexity = len(str_formula.split())  # Rough estimate: number of tokens
+
             return {
                 "equation": equation,
                 "str_formula": str_formula,
                 "score": float(score),
-                "complexity": len(str_formula),
+                "complexity": int(complexity),
                 "feature_names": feature_names,
                 "target_name": target_name,
-                "is_linear": False
+                "is_linear": False,
+                "method": "gplearn (Genetic Algorithm)"
             }
         except Exception as e:
-            st.warning(f"⚠️ gplearn failed ({e}), switching to linear…")
+            raise FormulaDiscoveryError(f"gplearn failed: {e}")
 
     # === Linear fallback ===
-    model = LinearRegression()
-    model.fit(X_arr, y_arr)
-    y_pred = model.predict(X_arr)
-    score = r2_score(y_arr, y_pred)
+    if method == "linear" and linear_available:
+        model = LinearRegression()
+        model.fit(X_arr, y_arr)
+        y_pred = model.predict(X_arr)
+        score = r2_score(y_arr, y_pred)
 
-    coeffs = model.coef_
-    intercept = model.intercept_
-    terms = [sp.Float(coeff) * sp.Symbol(name) for name, coeff in zip(feature_names, coeffs)]
-    equation = sum(terms) + sp.Float(intercept)
+        coeffs = model.coef_
+        intercept = model.intercept_
+        terms = [sp.Float(coeff) * sp.Symbol(name) for name, coeff in zip(feature_names, coeffs)]
+        equation = sum(terms) + sp.Float(intercept)
 
-    return {
-        "equation": equation,
-        "str_formula": str(equation),
-        "score": float(score),
-        "complexity": len(feature_names) + 1,
-        "feature_names": feature_names,
-        "target_name": target_name,
-        "is_linear": True
-    }
+        return {
+            "equation": equation,
+            "str_formula": str(sp.simplify(equation)),
+            "score": float(score),
+            "complexity": len(feature_names) + 1,
+            "feature_names": feature_names,
+            "target_name": target_name,
+            "is_linear": True,
+            "method": "Linear Regression"
+        }
+    else:
+        raise FormulaDiscoveryError(f"Method '{method}' not available.")
 
 
 def load_and_preprocess_data(uploaded_files, n_rows=None):
@@ -218,18 +231,27 @@ if not formula_features or formula_target not in params or formula_target in for
     st.error("❌ Select valid features (excluding target).")
     st.stop()
 
-# Method choice
-method_choice = st.radio(
-    "📊 Method",
-    options=["Best Available (Symbolic if possible)", "Linear Only"],
-    index=0 if BACKEND != "linear" else 1,
-    help="Symbolic: nonlinear discovery (PySR/gplearn). Linear: simple regression."
-)
-use_symbolic = (method_choice == "Best Available (Symbolic if possible)")
+# Available methods
+available_methods = []
+if pysr_available:
+    available_methods.append("pysr")
+if gplearn_available:
+    available_methods.append("gplearn")
+available_methods.append("linear")
 
-if BACKEND == "linear" and use_symbolic:
-    st.warning("⚠️ No symbolic backend available, using linear only.")
-    use_symbolic = False
+# Method choice
+method_options = {
+    "pysr": "PySR (Evolutionary Symbolic Regression)",
+    "gplearn": "gplearn (Genetic Algorithm Symbolic Regression)",
+    "linear": "Linear Regression"
+}
+selected_method_key = st.radio(
+    "📊 Select Method",
+    options=available_methods,
+    format_func=lambda key: method_options[key],
+    index=0,
+    help="Choose the discovery method: Evolutionary/GA for nonlinear (complex formulas with exp, trig, etc.), Linear for simple fits."
+)
 
 run_formula = st.button("🚀 Discover Formula", type="primary")
 
@@ -252,21 +274,21 @@ if run_formula:
             raise FormulaDiscoveryError(f"Insufficient valid data: {len(X_formula)} rows (need ≥{min_rows})")
 
         progress_bar.progress(0.4)
-        status_text.text("🔍 Running discovery...")
+        status_text.text(f"🔍 Running {method_options[selected_method_key]}...")
 
         formula_result = discover_formula(
             X_formula, y_formula, formula_features,
             max_complexity=max_complexity,
             n_iterations=n_iterations,
             target_name=formula_target,
-            use_symbolic=use_symbolic
+            method=selected_method_key
         )
 
         progress_bar.progress(0.8)
         status_text.text("📈 Generating visualization...")
 
         fallback_msg = " (Linear Approximation)" if formula_result.get("is_linear") else ""
-        st.success(f"✅ Formula discovered{fallback_msg}!")
+        st.success(f"✅ Formula discovered with {formula_result['method']}{fallback_msg}!")
 
         col_res1, col_res2 = st.columns(2)
         with col_res1:
@@ -275,8 +297,7 @@ if run_formula:
             st.metric("🔢 Complexity", formula_result['complexity'])
 
         st.subheader("📜 Discovered Formula")
-        formula_type = "Linear Model" if formula_result.get("is_linear") else "Symbolic Expression"
-        st.info(f"**Type:** {formula_type}")
+        st.info(f"**Method:** {formula_result['method']}")
 
         latex_formula = sp.latex(formula_result['equation'])
         st.latex(latex_formula)
@@ -308,7 +329,7 @@ if run_formula:
             fig = px.scatter(
                 x=y_actual_valid, y=y_pred_valid,
                 labels={'x': f'Actual {formula_target}', 'y': f'Predicted {formula_target}'},
-                title=f'Predictions vs. Actual Values ({formula_type})',
+                title=f'Predictions vs. Actual Values ({formula_result["method"]})',
             )
             min_val = min(y_actual_valid.min(), y_pred_valid.min())
             max_val = max(y_actual_valid.max(), y_pred_valid.max())
@@ -325,7 +346,7 @@ if run_formula:
 ===================
 
 Target: {formula_result['target_name']}
-Type: {formula_type}
+Method: {formula_result['method']}
 R² Score: {formula_result['score']:.4f}
 Complexity: {formula_result['complexity']}
 Features: {', '.join(formula_result['feature_names'])}
