@@ -109,28 +109,24 @@ def discover_formula(
             torch.manual_seed(seed)
 
             # Prepare data as torch tensors
-            X_torch = torch.from_numpy(X_arr.T).float()  # (n_features, n_samples)
-            y_torch = torch.from_numpy(y_arr).float().unsqueeze(1)  # (n_samples, 1)
+            X_torch = torch.from_numpy(X_arr.T).float()   # PhySO expects (n_features, n_samples)
+            y_torch = torch.from_numpy(y_arr).float()     # must be shape (n_samples,)
 
-            # Dummy units
-            X_units = [[0.0] * 3 for _ in feature_names]  # Dummy [log10(kg), log10(m), log10(s)]
-            y_units = [0.0] * 3
+            # Dummy units (since no physical constraints)
+            X_units = [[1, 0, 0] for _ in feature_names]  # [kg, m, s] dummy
+            y_units = [1, 0, 0]
 
-            # Run SR with valid parameters only
+            # Run SR
             expression, logs = physo.SR(
-                X_torch,
-                y_torch,
+                X_torch, y_torch,
                 X_names=feature_names,
                 X_units=X_units,
                 y_name=target_name,
                 y_units=y_units,
-                op_names=["add", "mul", "sub", "div", "sin", "cos", "exp", "log", "sqrt", "neg"],  # Explicit for complex ops
-                use_protected_ops=True,
-                stop_reward=1.0,
-                epochs=n_iterations // 5,  # Scaled for GA depth
-                run_config=None,  # Default config
+                op_names=["add", "mul", "sub", "div", "sin", "cos", "exp", "log", "sqrt", "neg"],
+                run_config=physo.config.config0.config0,
                 parallel_mode=False,
-                device='cpu'
+                epochs=n_iterations // 5
             )
 
             # Get best expression
