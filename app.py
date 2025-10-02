@@ -1,8 +1,9 @@
 # formula_app.py
 """
 Standalone Streamlit App for Formula Discovery.
-Modernized with PySR (if Julia available), gplearn fallback (GA-based), and linear backup.
+Modernized with PySR (if Julia available), PhySO (GA-based symbolic regression), and linear backup.
 Run with: streamlit run formula_app.py
+Note: For Python 3.13+, gplearn may fail to build; PhySO replaces it as the GA backend.
 """
 
 import streamlit as st
@@ -23,7 +24,7 @@ os.environ['JULIA_LOAD_PATH'] = '/tmp/julia'
 
 # === Backend detection ===
 pysr_available = False
-gplearn_available = False
+physo_available = False
 try:
     from pysr import PySRRegressor
     pysr_available = True
@@ -31,8 +32,8 @@ except Exception:
     pass
 
 try:
-    from gplearn.genetic import SymbolicRegressor
-    gplearn_available = True
+    import physo
+    physo_available = True
 except Exception:
     pass
 
@@ -50,7 +51,7 @@ def discover_formula(
     max_complexity: int = 10,
     n_iterations: int = 100,
     target_name: str = "y",
-    method: str = "pysr"  # 'pysr', 'gplearn', 'linear'
+    method: str = "pysr"  # 'pysr', 'physo', 'linear'
 ) -> Dict[str, Any]:
     X_arr = X.values.astype(np.float64)
     y_arr = y.values.astype(np.float64)
@@ -97,32 +98,65 @@ def discover_formula(
         except Exception as e:
             raise FormulaDiscoveryError(f"PySR failed: {e}")
 
-    # === gplearn (Genetic Algorithm Symbolic Regression) ===
-    if method == "gplearn" and gplearn_available:
+    # === PhySO (Physics-Oriented Symbolic Regression, GA-based) ===
+    if method == "physo" and physo_available:
         try:
-            model = SymbolicRegressor(
-                generations=int(n_iterations / 10),
-                population_size=1000,
-                function_set=['add', 'sub', 'mul', 'div', 'sin', 'cos', 'sqrt', 'log', 'exp'],
-                parsimony_coefficient=0.001,
-                max_samples=1.0,
-                verbose=0,
-                random_state=42
+            import physo
+            import torch
+
+            # Seed for reproducibility
+            seed = 42
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+
+            # Prepare data as torch tensors
+            X_torch = torch.from_numpy(X_arr.T).float()  # PhySO expects features as rows
+            y_torch = torch.from_numpy(y_arr).float().unsqueeze(1)
+
+            # Dummy units (since no physical constraints)
+            X_units = [[1, 0, 0] for _ in feature_names]  # [kg, m, s]
+            y_units = [1, 0, 0]
+
+            # Run SR
+            expression, logs = physo.SR(
+                X_torch, y_torch,
+                X_names=feature_names,
+                X_units=X_units,
+                y_name=target_name,
+                y_units=y_units,
+                op_names=["add", "mul", "sub", "div", "sin", "cos", "exp", "log", "sqrt", "neg"],
+                complexity_weights=[1.0] * max_complexity,  # Penalize complexity
+                max_complexity=max_complexity,
+                num_generations=n_iterations // 10,  # Adjust for GA generations
+                num_epochs=1,  # One epoch per generation
+                run_config=physo.config.get("config0"),
+                parallel_mode=False,
+                show_progress=False
             )
-            model.fit(X_arr, y_arr)
-            y_pred = model.predict(X_arr)
-            score = r2_score(y_arr, y_pred)
 
-            str_formula = model._program.__str__()
-            # Replace X0, X1, … with actual feature names
-            for i, name in enumerate(feature_names):
-                str_formula = str_formula.replace(f"X{i}", name)
-            try:
-                equation = sp.sympify(str_formula)
-            except Exception:
-                equation = sp.Symbol(str_formula)
+            # Get best expression
+            best_expr = expression
+            str_formula = best_expr.get_infix()
+            sympy_expr = best_expr.get_infix_sympy()
+            equation = sympy_expr[0] if isinstance(sympy_expr, tuple) else sympy_expr
 
-            complexity = len(str_formula.split())  # Rough estimate: number of tokens
+            # Evaluate predictions
+            y_pred_list = []
+            for i in range(len(X_arr)):
+                row_dict = {sp.Symbol(name): float(X_arr[i, j]) for j, name in enumerate(feature_names)}
+                try:
+                    pred_val = float(equation.subs(row_dict).evalf())
+                    y_pred_list.append(pred_val)
+                except:
+                    y_pred_list.append(np.nan)
+            y_pred = np.array(y_pred_list)
+            mask_valid = ~np.isnan(y_pred)
+            if mask_valid.sum() > 0:
+                score = r2_score(y_arr[mask_valid], y_pred[mask_valid])
+            else:
+                score = 0.0
+
+            complexity = best_expr.complexity
 
             return {
                 "equation": equation,
@@ -132,10 +166,10 @@ def discover_formula(
                 "feature_names": feature_names,
                 "target_name": target_name,
                 "is_linear": False,
-                "method": "gplearn (Genetic Algorithm)"
+                "method": "PhySO (GA-based)"
             }
         except Exception as e:
-            raise FormulaDiscoveryError(f"gplearn failed: {e}")
+            raise FormulaDiscoveryError(f"PhySO failed: {e}")
 
     # === Linear fallback ===
     if method == "linear" and linear_available:
@@ -212,7 +246,7 @@ if st.button("Load Data"):
         st.session_state.df = df
         st.success(f"✅ Loaded {len(df)} rows with {len(df.columns)} numeric columns")
         with st.expander("👁️ Data Preview"):
-            st.dataframe(df.head(10), use_container_width=True)
+            st.dataframe(df.head(10), width='stretch')
 
 if 'df' not in st.session_state:
     st.warning("⚠️ Load data first.")
@@ -235,14 +269,14 @@ if not formula_features or formula_target not in params or formula_target in for
 available_methods = []
 if pysr_available:
     available_methods.append("pysr")
-if gplearn_available:
-    available_methods.append("gplearn")
+if physo_available:
+    available_methods.append("physo")
 available_methods.append("linear")
 
 # Method choice
 method_options = {
     "pysr": "PySR (Evolutionary Symbolic Regression)",
-    "gplearn": "gplearn (Genetic Algorithm Symbolic Regression)",
+    "physo": "PhySO (GA-based Symbolic Regression)",
     "linear": "Linear Regression"
 }
 selected_method_key = st.radio(
@@ -338,7 +372,7 @@ if run_formula:
                 mode='lines', name='Perfect Fit',
                 line=dict(dash='dash', color='red', width=2)
             ))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
         else:
             st.warning("⚠️ Could not evaluate formula on data points.")
 
