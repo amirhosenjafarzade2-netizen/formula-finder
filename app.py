@@ -1,9 +1,7 @@
-# formula_app.py
 """
 Standalone Streamlit App for Formula Discovery.
-Modernized with PySR (if Julia available), PhySO (GA-based symbolic regression), and linear backup.
+Supports PySR (if Julia available), PolynomialFeatures, Nonlinear Curve Fitting (scipy), Symbolic Curve Fitting (symfit), and Linear Regression.
 Run with: streamlit run formula_app.py
-Note: For Python 3.13+, gplearn may fail to build; PhySO replaces it as the GA backend.
 """
 
 import streamlit as st
@@ -17,6 +15,10 @@ from typing import List, Dict, Any
 import sympy as sp
 from sklearn.metrics import r2_score
 from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from scipy.optimize import curve_fit
+import symfit
+import uuid
 
 # Fix Julia env (for Streamlit Cloud)
 os.environ['JULIA_DEPOT_PATH'] = '/tmp/julia'
@@ -24,25 +26,19 @@ os.environ['JULIA_LOAD_PATH'] = '/tmp/julia'
 
 # === Backend detection ===
 pysr_available = False
-physo_available = False
 try:
     from pysr import PySRRegressor
     pysr_available = True
 except Exception:
     pass
 
-try:
-    import physo
-    physo_available = True
-except Exception:
-    pass
-
 linear_available = True  # Always available
-
+poly_available = True    # PolynomialFeatures is always available with sklearn
+curve_fit_available = True  # scipy.optimize.curve_fit is always available
+symfit_available = True  # Assume symfit is installed; handle errors if not
 
 class FormulaDiscoveryError(Exception):
     pass
-
 
 def discover_formula(
     X: pd.DataFrame,
@@ -51,7 +47,10 @@ def discover_formula(
     max_complexity: int = 10,
     n_iterations: int = 100,
     target_name: str = "y",
-    method: str = "pysr"  # 'pysr', 'physo', 'linear'
+    method: str = "pysr",
+    poly_degree: int = 2,
+    nonlinear_model: str = "exponential",
+    custom_model: str = None
 ) -> Dict[str, Any]:
     X_arr = X.values.astype(np.float64)
     y_arr = y.values.astype(np.float64)
@@ -98,60 +97,92 @@ def discover_formula(
         except Exception as e:
             raise FormulaDiscoveryError(f"PySR failed: {e}")
 
-    # === PhySO (Physics-Oriented Symbolic Regression, GA-based) ===
-    if method == "physo" and physo_available:
+    # === Polynomial Regression (PolynomialFeatures + LinearRegression) ===
+    if method == "poly" and poly_available:
         try:
-            import torch
+            # Scale features to stabilize polynomial regression
+            scaler = StandardScaler()
+            X_scaled = scaler.fit_transform(X_arr)
 
-            # Seed for reproducibility
-            seed = 42
-            np.random.seed(seed)
-            torch.manual_seed(seed)
+            poly = PolynomialFeatures(degree=poly_degree, include_bias=False)
+            X_poly = poly.fit_transform(X_scaled)
 
-            # Prepare data as torch tensors
-            X_torch = torch.from_numpy(X_arr.T).float()   # PhySO expects (n_features, n_samples)
-            y_torch = torch.from_numpy(y_arr).float()     # must be shape (n_samples,)
+            model = LinearRegression()
+            model.fit(X_poly, y_arr)
+            y_pred = model.predict(X_poly)
+            score = r2_score(y_arr, y_pred)
 
-            # Dummy units (since no physical constraints)
-            X_units = [[1, 0, 0] for _ in feature_names]  # [kg, m, s] dummy
-            y_units = [1, 0, 0]
+            # Construct symbolic equation
+            feature_names_poly = poly.get_feature_names_out(feature_names)
+            terms = [sp.Float(coef) * sp.sympify(name.replace(" ", "*")) for coef, name in zip(model.coef_, feature_names_poly)]
+            equation = sum(terms) + sp.Float(model.intercept_)
+            complexity = len(feature_names_poly) + 1
 
-            # Run SR
-            expression, logs = physo.SR(
-                X_torch, y_torch,
-                X_names=feature_names,
-                X_units=X_units,
-                y_name=target_name,
-                y_units=y_units,
-                op_names=["add", "mul", "sub", "div", "sin", "cos", "exp", "log", "sqrt", "neg"],
-                run_config=physo.config.config0.config0,
-                parallel_mode=False,
-                epochs=n_iterations // 5
-            )
+            return {
+                "equation": equation,
+                "str_formula": str(sp.simplify(equation)),
+                "score": float(score),
+                "complexity": int(complexity),
+                "feature_names": feature_names,
+                "target_name": target_name,
+                "is_linear": False,
+                "method": f"Polynomial Regression (Degree {poly_degree})"
+            }
+        except Exception as e:
+            raise FormulaDiscoveryError(f"Polynomial Regression failed: {e}")
 
-            # Get best expression
-            best_expr = expression[0] if hasattr(expression, '__len__') and len(expression) > 0 else expression
-            str_formula = best_expr.get_infix()
-            sympy_expr = best_expr.get_infix_sympy()
-            equation = sympy_expr[0] if isinstance(sympy_expr, (list, tuple)) else sympy_expr
+    # === Nonlinear Curve Fitting (scipy.optimize.curve_fit) ===
+    if method == "curve_fit" and curve_fit_available:
+        try:
+            # Define predefined model templates
+            model_templates = {
+                "exponential": lambda X, a, b, c: a * np.exp(b * X[:, 0]) + c,
+                "sinusoidal": lambda X, a, b, c: a * np.sin(b * X[:, 0]) + c,
+                "logistic": lambda X, a, b, c: a / (1 + np.exp(-b * (X[:, 0] - c)))
+            }
 
-            # Evaluate predictions
-            y_pred_list = []
-            for i in range(len(X_arr)):
-                row_dict = {sp.Symbol(name): X_arr[i, j] for j, name in enumerate(feature_names)}
+            # Handle custom model
+            if nonlinear_model == "custom" and custom_model:
                 try:
-                    pred_val = float(equation.subs(row_dict).evalf())
-                    y_pred_list.append(pred_val)
-                except Exception:
-                    y_pred_list.append(np.nan)
-            y_pred = np.array(y_pred_list)
-            mask_valid = ~np.isnan(y_pred)
-            score = r2_score(y_arr[mask_valid], y_pred[mask_valid]) if mask_valid.sum() > 0 else 0.0
+                    expr = sp.sympify(custom_model)
+                    params = sorted([str(p) for p in expr.free_symbols if str(p) not in feature_names + [target_name]])
+                    def custom_func(X, *p):
+                        subs_dict = {sp.Symbol(feature_names[i]): X[:, i] for i in range(X.shape[1])}
+                        subs_dict.update({sp.Symbol(param): p[i] for i, param in enumerate(params)})
+                        return float(expr.subs(subs_dict).evalf())
+                    model_func = custom_func
+                    n_params = len(params)
+                except Exception as e:
+                    raise FormulaDiscoveryError(f"Invalid custom model: {e}")
+            else:
+                model_func = model_templates.get(nonlinear_model)
+                n_params = 3  # a, b, c for predefined models
+                if not model_func:
+                    raise FormulaDiscoveryError(f"Unknown model: {nonlinear_model}")
 
-            try:
-                complexity = best_expr.complexity
-            except:
-                complexity = max_complexity  # Fallback
+            # Fit model
+            popt, _ = curve_fit(model_func, X_arr, y_arr, maxfev=n_iterations * 100)
+            y_pred = model_func(X_arr, *popt)
+            score = r2_score(y_arr, y_pred)
+
+            # Construct symbolic equation
+            if nonlinear_model == "custom" and custom_model:
+                equation = sp.sympify(custom_model)
+                subs_dict = {sp.Symbol(param): popt[i] for i, param in enumerate(params)}
+                equation = equation.subs(subs_dict)
+            else:
+                x0 = sp.Symbol(feature_names[0])
+                if nonlinear_model == "exponential":
+                    equation = popt[0] * sp.exp(popt[1] * x0) + popt[2]
+                elif nonlinear_model == "sinusoidal":
+                    equation = popt[0] * sp.sin(popt[1] * x0) + popt[2]
+                elif nonlinear_model == "logistic":
+                    equation = popt[0] / (1 + sp.exp(-popt[1] * (x0 - popt[2])))
+                else:
+                    raise FormulaDiscoveryError("Model not implemented.")
+
+            complexity = len(list(sp.preorder_traversal(equation)))
+            str_formula = str(sp.simplify(equation))
 
             return {
                 "equation": equation,
@@ -161,12 +192,71 @@ def discover_formula(
                 "feature_names": feature_names,
                 "target_name": target_name,
                 "is_linear": False,
-                "method": "PhySO (GA-based)"
+                "method": f"Nonlinear Curve Fitting ({nonlinear_model})"
             }
         except Exception as e:
-            raise FormulaDiscoveryError(f"PhySO failed: {e}")
+            raise FormulaDiscoveryError(f"Nonlinear Curve Fitting failed: {e}")
 
-    # === Linear fallback ===
+    # === Symbolic Curve Fitting (symfit) ===
+    if method == "symfit" and symfit_available:
+        try:
+            # Define variables and parameters
+            variables = {name: symfit.Variable(name) for name in feature_names}
+            params = {f'p{i}': symfit.Parameter(f'p{i}') for i in range(3)}  # Example: 3 parameters
+            y_var = symfit.Variable(target_name)
+
+            # Define model (predefined or custom)
+            if nonlinear_model == "custom" and custom_model:
+                try:
+                    expr = sp.sympify(custom_model)
+                    param_names = sorted([str(p) for p in expr.free_symbols if str(p) not in feature_names + [target_name]])
+                    params = {name: symfit.Parameter(name) for name in param_names}
+                    model = sp.lambdify(list(params.values()) + list(variables.values()), expr, 'numpy')
+                    model_dict = {y_var: model}
+                except Exception as e:
+                    raise FormulaDiscoveryError(f"Invalid custom model: {e}")
+            else:
+                x0 = variables[feature_names[0]]
+                if nonlinear_model == "exponential":
+                    model_dict = {y_var: params['p0'] * symfit.exp(params['p1'] * x0) + params['p2']}
+                elif nonlinear_model == "sinusoidal":
+                    model_dict = {y_var: params['p0'] * symfit.sin(params['p1'] * x0) + params['p2']}
+                elif nonlinear_model == "logistic":
+                    model_dict = {y_var: params['p0'] / (1 + symfit.exp(-params['p1'] * (x0 - params['p2'])))}
+                else:
+                    raise FormulaDiscoveryError(f"Unknown model: {nonlinear_model}")
+
+            # Fit model
+            fit = symfit.Fit(model_dict, **{name: X_arr[:, i] for i, name in enumerate(feature_names)}, y=y_arr)
+            fit_result = fit.execute(maxiter=n_iterations * 100)
+
+            # Construct symbolic equation
+            param_values = {sp.Symbol(k): v for k, v in fit_result.params.items()}
+            equation = list(model_dict.values())[0]
+            equation = sp.sympify(str(equation).replace('Variable', '').replace('Parameter', ''))
+            equation = equation.subs(param_values)
+            complexity = len(list(sp.preorder_traversal(equation)))
+            str_formula = str(sp.simplify(equation))
+
+            # Predict for scoring
+            X_dict = {name: X_arr[:, i] for i, name in enumerate(feature_names)}
+            y_pred = fit.model(**X_dict, **fit_result.params).y
+            score = r2_score(y_arr, y_pred)
+
+            return {
+                "equation": equation,
+                "str_formula": str_formula,
+                "score": float(score),
+                "complexity": int(complexity),
+                "feature_names": feature_names,
+                "target_name": target_name,
+                "is_linear": False,
+                "method": f"Symbolic Curve Fitting ({nonlinear_model})"
+            }
+        except Exception as e:
+            raise FormulaDiscoveryError(f"Symbolic Curve Fitting failed: {e}")
+
+    # === Linear Regression ===
     if method == "linear" and linear_available:
         model = LinearRegression()
         model.fit(X_arr, y_arr)
@@ -175,7 +265,7 @@ def discover_formula(
 
         coeffs = model.coef_
         intercept = model.intercept_
-        terms = [sp.Float(coeff) * sp.Symbol(name) for name, coeff in zip(feature_names, coeffs)]
+        terms = [sp.Float(coef) * sp.Symbol(name) for name, coef in zip(feature_names, coeffs)]
         equation = sum(terms) + sp.Float(intercept)
 
         return {
@@ -188,9 +278,8 @@ def discover_formula(
             "is_linear": True,
             "method": "Linear Regression"
         }
-    else:
-        raise FormulaDiscoveryError(f"Method '{method}' not available.")
 
+    raise FormulaDiscoveryError(f"Method '{method}' not available.")
 
 def load_and_preprocess_data(uploaded_files, n_rows=None):
     """Load numeric Excel data or generate sample."""
@@ -220,7 +309,6 @@ def load_and_preprocess_data(uploaded_files, n_rows=None):
         return pd.concat(dfs, ignore_index=True)
     return pd.DataFrame()
 
-
 # === Streamlit UI ===
 st.set_page_config(page_title="Formula Discovery App", layout="wide")
 
@@ -230,6 +318,17 @@ st.sidebar.header("⚙️ Config")
 n_iterations = st.sidebar.number_input("Iterations", min_value=10, value=100, help="Number of search iterations")
 max_complexity = st.sidebar.number_input("Max Complexity", min_value=1, value=10, help="Max equation size")
 min_rows = st.sidebar.number_input("Min Rows", min_value=5, value=10, help="Minimum data points required")
+poly_degree = st.sidebar.number_input("Polynomial Degree", min_value=1, value=2, help="Degree for Polynomial Regression")
+nonlinear_model = st.sidebar.selectbox(
+    "Nonlinear Model",
+    options=["exponential", "sinusoidal", "logistic", "custom"],
+    help="Model type for Nonlinear and Symbolic Curve Fitting"
+)
+custom_model = st.sidebar.text_input(
+    "Custom Model (sympy syntax)",
+    value="",
+    help="Enter a custom model, e.g., 'a * x1 + b * sin(x2) + c'. Leave blank for predefined models."
+)
 
 uploaded_files = st.file_uploader("📁 Upload Excel files", accept_multiple_files=True, type=['xlsx', 'xls'])
 n_rows_input = st.number_input("Sample rows (0 for all)", min_value=0, value=0)
@@ -264,14 +363,14 @@ if not formula_features or formula_target not in params or formula_target in for
 available_methods = []
 if pysr_available:
     available_methods.append("pysr")
-if physo_available:
-    available_methods.append("physo")
-available_methods.append("linear")
+available_methods.extend(["poly", "curve_fit", "symfit", "linear"])
 
 # Method choice
 method_options = {
     "pysr": "PySR (Evolutionary Symbolic Regression)",
-    "physo": "PhySO (GA-based Symbolic Regression)",
+    "poly": f"Polynomial Regression (Degree {poly_degree})",
+    "curve_fit": f"Nonlinear Curve Fitting ({nonlinear_model})",
+    "symfit": f"Symbolic Curve Fitting ({nonlinear_model})",
     "linear": "Linear Regression"
 }
 selected_method_key = st.radio(
@@ -279,7 +378,7 @@ selected_method_key = st.radio(
     options=available_methods,
     format_func=lambda key: method_options[key],
     index=0,
-    help="Choose the discovery method: Evolutionary/GA for nonlinear (complex formulas with exp, trig, etc.), Linear for simple fits."
+    help="Choose the discovery method: PySR for complex formulas, Polynomial for polynomial fits, Curve/Symbolic for specific nonlinear models, Linear for simple fits."
 )
 
 run_formula = st.button("🚀 Discover Formula", type="primary")
@@ -310,7 +409,10 @@ if run_formula:
             max_complexity=max_complexity,
             n_iterations=n_iterations,
             target_name=formula_target,
-            method=selected_method_key
+            method=selected_method_key,
+            poly_degree=poly_degree,
+            nonlinear_model=nonlinear_model,
+            custom_model=custom_model
         )
 
         progress_bar.progress(0.8)
@@ -386,9 +488,9 @@ LaTeX Formula:
 Plain Text:
 {formula_result['str_formula']}"""
         st.download_button(
-            "💾 Download Report", 
-            formula_text, 
-            f"formula_report_{formula_target}.txt", 
+            "💾 Download Report",
+            formula_text,
+            f"formula_report_{formula_target}.txt",
             "text/plain"
         )
 
