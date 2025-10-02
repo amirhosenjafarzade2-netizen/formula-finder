@@ -1,6 +1,6 @@
 """
 Standalone Streamlit App for Formula Discovery.
-Supports PySR (if Julia available), PolynomialFeatures, Nonlinear Curve Fitting (scipy), Symbolic Curve Fitting (symfit, excluding exponential), and Linear Regression.
+Supports PySR (if Julia available), PolynomialFeatures, Nonlinear Curve Fitting (scipy), and Linear Regression.
 Run with: streamlit run formula_app.py
 """
 
@@ -17,7 +17,6 @@ from sklearn.metrics import r2_score
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 from scipy.optimize import curve_fit
-import symfit
 import uuid
 
 # Fix Julia env (for Streamlit Cloud)
@@ -35,7 +34,6 @@ except Exception:
 linear_available = True  # Always available
 poly_available = True    # PolynomialFeatures is always available with sklearn
 curve_fit_available = True  # scipy.optimize.curve_fit is always available
-symfit_available = True  # Assume symfit is installed; handle errors if not
 
 class FormulaDiscoveryError(Exception):
     pass
@@ -200,69 +198,6 @@ def discover_formula(
         except Exception as e:
             raise FormulaDiscoveryError(f"Nonlinear Curve Fitting failed: {e}")
 
-    # === Symbolic Curve Fitting (symfit) ===
-    if method == "symfit" and symfit_available:
-        try:
-            # Define variables
-            variables = {name: symfit.Variable(name) for name in feature_names}
-            y_var = symfit.Variable(target_name)
-
-            # Check for naming conflicts with feature names
-            reserved_params = {'a', 'b', 'c'}
-            if any(name in reserved_params for name in feature_names + [target_name]):
-                raise FormulaDiscoveryError("Feature or target names cannot be 'a', 'b', or 'c'.")
-
-            # Define model (predefined or custom, no exponential)
-            if nonlinear_model == "custom" and custom_model:
-                try:
-                    expr = sp.sympify(custom_model)
-                    param_names = sorted([str(p) for p in expr.free_symbols if str(p) not in feature_names + [target_name]])
-                    # Check for duplicate parameters
-                    if len(param_names) != len(set(param_names)):
-                        raise FormulaDiscoveryError("Custom model contains duplicate parameter names.")
-                    params = {name: symfit.Parameter(name) for name in param_names}
-                    model_dict = {y_var: expr}
-                except Exception as e:
-                    raise FormulaDiscoveryError(f"Invalid custom model: {e}")
-            else:
-                params = {'a': symfit.Parameter('a'), 'b': symfit.Parameter('b'), 'c': symfit.Parameter('c')}
-                x0 = variables[feature_names[0]]
-                if nonlinear_model == "sinusoidal":
-                    model_dict = {y_var: params['a'] * symfit.sin(params['b'] * x0) + params['c']}
-                elif nonlinear_model == "logistic":
-                    model_dict = {y_var: params['a'] / (1 + symfit.exp(-params['b'] * (x0 - params['c'])))}
-                else:
-                    raise FormulaDiscoveryError(f"Unknown model: {nonlinear_model}. Exponential model is not supported for Symbolic Curve Fitting.")
-
-            # Fit model
-            fit = symfit.Fit(model_dict, **{name: X_arr[:, i] for i, name in enumerate(feature_names)}, y=y_arr)
-            fit_result = fit.execute(maxiter=n_iterations * 100)
-
-            # Construct symbolic equation
-            equation = list(model_dict.values())[0]
-            param_values = {sp.Symbol(k): v for k, v in fit_result.params.items()}
-            equation = sp.sympify(equation)
-            equation = equation.subs(param_values)
-            complexity = len(list(sp.preorder_traversal(equation)))
-            str_formula = str(sp.simplify(equation))
-
-            # Predict for scoring
-            y_pred = fit.model(**{name: X_arr[:, i] for i, name in enumerate(feature_names)}, **fit_result.params).y
-            score = r2_score(y_arr, y_pred)
-
-            return {
-                "equation": equation,
-                "str_formula": str_formula,
-                "score": float(score),
-                "complexity": int(complexity),
-                "feature_names": feature_names,
-                "target_name": target_name,
-                "is_linear": False,
-                "method": f"Symbolic Curve Fitting ({nonlinear_model})"
-            }
-        except Exception as e:
-            raise FormulaDiscoveryError(f"Symbolic Curve Fitting failed: {e}")
-
     # === Linear Regression ===
     if method == "linear" and linear_available:
         model = LinearRegression()
@@ -326,54 +261,16 @@ n_iterations = st.sidebar.number_input("Iterations", min_value=10, value=100, he
 max_complexity = st.sidebar.number_input("Max Complexity", min_value=1, value=10, help="Max equation size")
 min_rows = st.sidebar.number_input("Min Rows", min_value=5, value=10, help="Minimum data points required")
 poly_degree = st.sidebar.number_input("Polynomial Degree", min_value=1, value=2, help="Degree for Polynomial Regression")
-
-# Available methods
-available_methods = []
-if pysr_available:
-    available_methods.append("pysr")
-available_methods.extend(["poly", "curve_fit", "symfit", "linear"])
-
-# Method choice (must come before nonlinear_model to determine options)
-method_options = {
-    "pysr": "PySR (Evolutionary Symbolic Regression)",
-    "poly": f"Polynomial Regression (Degree {poly_degree})",
-    "curve_fit": "Nonlinear Curve Fitting",
-    "symfit": "Symbolic Curve Fitting",
-    "linear": "Linear Regression"
-}
-selected_method_key = st.radio(
-    "📊 Select Method",
-    options=available_methods,
-    format_func=lambda key: method_options[key],
-    index=0,
-    help="Choose the discovery method: PySR for complex formulas, Polynomial for polynomial fits, Curve/Symbolic for specific nonlinear models, Linear for simple fits."
-)
-
-# Dynamic nonlinear model options based on selected method
-if selected_method_key == "symfit":
-    nonlinear_model_options = ["sinusoidal", "logistic", "custom"]
-    nonlinear_model_help = "Model type for Symbolic Curve Fitting (exponential not supported)."
-else:
-    nonlinear_model_options = ["exponential", "sinusoidal", "logistic", "custom"]
-    nonlinear_model_help = "Model type for Nonlinear Curve Fitting."
-
 nonlinear_model = st.sidebar.selectbox(
     "Nonlinear Model",
-    options=nonlinear_model_options,
-    format_func=lambda x: x if x != "exponential" else "exponential (Nonlinear Curve Fitting only)",
-    help=nonlinear_model_help
+    options=["exponential", "sinusoidal", "logistic", "custom"],
+    help="Model type for Nonlinear Curve Fitting"
 )
-
 custom_model = st.sidebar.text_input(
     "Custom Model (sympy syntax)",
     value="",
     help="Enter a custom model, e.g., 'a * x1 + b * sin(x2) + c'. Leave blank for predefined models."
 )
-
-# Prevent exponential model for symfit (fallback check)
-if selected_method_key == "symfit" and nonlinear_model == "exponential":
-    st.error("❌ Exponential model is not supported for Symbolic Curve Fitting. Please select another model.")
-    st.stop()
 
 uploaded_files = st.file_uploader("📁 Upload Excel files", accept_multiple_files=True, type=['xlsx', 'xls'])
 n_rows_input = st.number_input("Sample rows (0 for all)", min_value=0, value=0)
@@ -404,14 +301,26 @@ if not formula_features or formula_target not in params or formula_target in for
     st.error("❌ Select valid features (excluding target).")
     st.stop()
 
-# Update method options to reflect current nonlinear model and poly degree
+# Available methods
+available_methods = []
+if pysr_available:
+    available_methods.append("pysr")
+available_methods.extend(["poly", "curve_fit", "linear"])
+
+# Method choice
 method_options = {
     "pysr": "PySR (Evolutionary Symbolic Regression)",
     "poly": f"Polynomial Regression (Degree {poly_degree})",
     "curve_fit": f"Nonlinear Curve Fitting ({nonlinear_model})",
-    "symfit": f"Symbolic Curve Fitting ({nonlinear_model})",
     "linear": "Linear Regression"
 }
+selected_method_key = st.radio(
+    "📊 Select Method",
+    options=available_methods,
+    format_func=lambda key: method_options[key],
+    index=0,
+    help="Choose the discovery method: PySR for complex formulas, Polynomial for polynomial fits, Curve for specific nonlinear models, Linear for simple fits."
+)
 
 run_formula = st.button("🚀 Discover Formula", type="primary")
 
