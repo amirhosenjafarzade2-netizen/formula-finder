@@ -406,4 +406,3 @@ Plain Text:
     finally:
         progress_bar.empty()
         status_text.empty()
-```
