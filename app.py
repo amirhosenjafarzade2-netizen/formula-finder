@@ -94,12 +94,9 @@ def discover_formula(
     # === gplearn fallback ===
     if use_symbolic and BACKEND == "gplearn":
         try:
-            from gplearn.genetic import SymbolicRegressor
             model = SymbolicRegressor(
                 generations=int(n_iterations / 10),
                 population_size=1000,
-                hall_of_fame=1,
-                n_components=1,
                 function_set=['add', 'sub', 'mul', 'div', 'sin', 'cos', 'sqrt', 'log'],
                 parsimony_coefficient=0.001,
                 max_samples=1.0,
@@ -114,7 +111,10 @@ def discover_formula(
             # Replace X0, X1, … with actual feature names
             for i, name in enumerate(feature_names):
                 str_formula = str_formula.replace(f"X{i}", name)
-            equation = sp.sympify(str_formula)
+            try:
+                equation = sp.sympify(str_formula)
+            except Exception:
+                equation = sp.Symbol(str_formula)
 
             return {
                 "equation": equation,
