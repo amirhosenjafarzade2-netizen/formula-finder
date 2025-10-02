@@ -370,7 +370,7 @@ if not formula_features or formula_target not in params or formula_target in for
 
 # Available methods
 available_methods = []
-if pys utilize
+if pysr_available:
     available_methods.append("pysr")
 available_methods.extend(["poly", "curve_fit", "symfit", "linear"])
 
