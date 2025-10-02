@@ -1,6 +1,6 @@
 """
 Standalone Streamlit App for Formula Discovery.
-Supports PySR (if Julia available), PolynomialFeatures, Nonlinear Curve Fitting (scipy), Symbolic Curve Fitting (symfit), and Linear Regression.
+Supports PySR (if Julia available), PolynomialFeatures, Nonlinear Curve Fitting (scipy), Symbolic Curve Fitting (symfit, excluding exponential), and Linear Regression.
 Run with: streamlit run formula_app.py
 """
 
@@ -212,7 +212,7 @@ def discover_formula(
             if any(name in reserved_params for name in feature_names + [target_name]):
                 raise FormulaDiscoveryError("Feature or target names cannot be 'a', 'b', or 'c'.")
 
-            # Define model (predefined or custom)
+            # Define model (predefined or custom, no exponential)
             if nonlinear_model == "custom" and custom_model:
                 try:
                     expr = sp.sympify(custom_model)
@@ -227,14 +227,12 @@ def discover_formula(
             else:
                 params = {'a': symfit.Parameter('a'), 'b': symfit.Parameter('b'), 'c': symfit.Parameter('c')}
                 x0 = variables[feature_names[0]]
-                if nonlinear_model == "exponential":
-                    model_dict = {y_var: params['a'] * symfit.exp(params['b'] * x0) + params['c']}
-                elif nonlinear_model == "sinusoidal":
+                if nonlinear_model == "sinusoidal":
                     model_dict = {y_var: params['a'] * symfit.sin(params['b'] * x0) + params['c']}
                 elif nonlinear_model == "logistic":
                     model_dict = {y_var: params['a'] / (1 + symfit.exp(-params['b'] * (x0 - params['c'])))}
                 else:
-                    raise FormulaDiscoveryError(f"Unknown model: {nonlinear_model}")
+                    raise FormulaDiscoveryError(f"Unknown model: {nonlinear_model}. Exponential model is not supported for Symbolic Curve Fitting.")
 
             # Fit model
             fit = symfit.Fit(model_dict, **{name: X_arr[:, i] for i, name in enumerate(feature_names)}, y=y_arr)
@@ -331,7 +329,8 @@ poly_degree = st.sidebar.number_input("Polynomial Degree", min_value=1, value=2,
 nonlinear_model = st.sidebar.selectbox(
     "Nonlinear Model",
     options=["exponential", "sinusoidal", "logistic", "custom"],
-    help="Model type for Nonlinear and Symbolic Curve Fitting"
+    format_func=lambda x: x if x != "exponential" else "exponential (Nonlinear Curve Fitting only)",
+    help="Model type for Nonlinear and Symbolic Curve Fitting. Exponential is only available for Nonlinear Curve Fitting."
 )
 custom_model = st.sidebar.text_input(
     "Custom Model (sympy syntax)",
@@ -389,6 +388,11 @@ selected_method_key = st.radio(
     index=0,
     help="Choose the discovery method: PySR for complex formulas, Polynomial for polynomial fits, Curve/Symbolic for specific nonlinear models, Linear for simple fits."
 )
+
+# Prevent exponential model for symfit
+if selected_method_key == "symfit" and nonlinear_model == "exponential":
+    st.error("❌ Exponential model is not supported for Symbolic Curve Fitting. Please select another model.")
+    st.stop()
 
 run_formula = st.button("🚀 Discover Formula", type="primary")
 
