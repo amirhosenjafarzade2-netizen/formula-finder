@@ -1,6 +1,6 @@
 """
 Standalone Streamlit App for Formula Discovery.
-Supports PySR (if Julia available), Genetic Polynomial, PolynomialFeatures, Nonlinear Curve Fitting (scipy), Linear Regression, and Formula Validation.
+Supports PySR (if Julia available), PolynomialFeatures, Nonlinear Curve Fitting (scipy), and Linear Regression.
 Run with: streamlit run formula_app.py
 """
 
@@ -18,20 +18,19 @@ from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 from scipy.optimize import curve_fit
 import uuid
-import genetic_poly_discovery
-import formula_validation
+import pdfplumber
 
-# Fix Julia env for Streamlit Cloud
-os.environ['JULIA_DEPOT_PATH'] = os.path.expanduser('~/.julia')
-os.environ['JULIA_LOAD_PATH'] = os.path.expanduser('~/.julia')
+# Fix Julia env (for Streamlit Cloud)
+os.environ['JULIA_DEPOT_PATH'] = '/tmp/julia'
+os.environ['JULIA_LOAD_PATH'] = '/tmp/julia'
 
 # === Backend detection ===
 pysr_available = False
 try:
     from pysr import PySRRegressor
     pysr_available = True
-except Exception as e:
-    st.warning(f"PySR not available: {e}")
+except Exception:
+    pass
 
 linear_available = True  # Always available
 poly_available = True    # PolynomialFeatures is always available with sklearn
@@ -96,18 +95,6 @@ def discover_formula(
             }
         except Exception as e:
             raise FormulaDiscoveryError(f"PySR failed: {e}")
-
-    # === Genetic Polynomial (via genetic_poly_discovery module) ===
-    if method == "genetic_poly" and pysr_available:
-        try:
-            return genetic_poly_discovery.discover_genetic_poly(
-                X, y, feature_names,
-                max_complexity=max_complexity,
-                n_iterations=n_iterations,
-                target_name=target_name
-            )
-        except Exception as e:
-            raise FormulaDiscoveryError(f"Genetic Polynomial failed: {e}")
 
     # === Polynomial Regression (PolynomialFeatures + LinearRegression) ===
     if method == "poly" and poly_available:
@@ -319,13 +306,11 @@ if not formula_features or formula_target not in params or formula_target in for
 available_methods = []
 if pysr_available:
     available_methods.append("pysr")
-    available_methods.append("genetic_poly")
 available_methods.extend(["poly", "curve_fit", "linear"])
 
 # Method choice
 method_options = {
     "pysr": "PySR (Evolutionary Symbolic Regression)",
-    "genetic_poly": "Genetic Algorithm (Polynomial)",
     "poly": f"Polynomial Regression (Degree {poly_degree})",
     "curve_fit": f"Nonlinear Curve Fitting ({nonlinear_model})",
     "linear": "Linear Regression"
@@ -335,7 +320,7 @@ selected_method_key = st.radio(
     options=available_methods,
     format_func=lambda key: method_options[key],
     index=0,
-    help="Choose the discovery method: PySR for complex formulas, Genetic for polynomial via genetic alg, Polynomial for polynomial fits, Curve for specific nonlinear models, Linear for simple fits."
+    help="Choose the discovery method: PySR for complex formulas, Polynomial for polynomial fits, Curve for specific nonlinear models, Linear for simple fits."
 )
 
 run_formula = st.button("🚀 Discover Formula", type="primary")
@@ -462,11 +447,75 @@ Plain Text:
             "text/plain"
         )
 
-        # Store for validation
-        st.session_state.formula_result = formula_result
-        st.session_state.selected_method_key = selected_method_key
-        st.session_state.formula_features = formula_features
-        st.session_state.formula_target = formula_target
+        # Extra module for formula validation
+        if st.button("🛡️ Validate Formula on New Data"):
+            validation_file = st.file_uploader("📁 Upload PDF for Validation", type=['pdf'])
+            if validation_file:
+                try:
+                    with pdfplumber.open(validation_file) as pdf:
+                        if pdf.pages:
+                            page = pdf.pages[0]
+                            table = page.extract_table()
+                            if table:
+                                val_df = pd.DataFrame(table[1:], columns=table[0])
+                                val_df = val_df.apply(pd.to_numeric, errors='coerce')
+                                val_df = val_df.dropna()
+                            else:
+                                raise ValueError("No table found in PDF.")
+                        else:
+                            raise ValueError("Empty PDF.")
+                    
+                    required_cols = formula_features + [formula_target]
+                    if set(required_cols).issubset(val_df.columns):
+                        X_val = val_df[formula_features]
+                        y_val = val_df[formula_target]
+                        
+                        if selected_method_key == "poly":
+                            scaler = formula_result.get("scaler")
+                            poly = formula_result.get("poly")
+                            model = formula_result.get("model")
+                            X_scaled = scaler.transform(X_val.values)
+                            X_poly = poly.transform(X_scaled)
+                            y_pred_val = model.predict(X_poly)
+                        else:
+                            equation = formula_result['equation']
+                            y_pred_val = []
+                            for idx in range(len(X_val)):
+                                row = X_val.iloc[idx]
+                                val_dict = {sp.Symbol(name): float(row[name]) for name in formula_features}
+                                try:
+                                    pred_val = float(equation.subs(val_dict).evalf())
+                                    y_pred_val.append(pred_val)
+                                except Exception:
+                                    y_pred_val.append(np.nan)
+                            y_pred_val = np.array(y_pred_val)
+                        
+                        mask_valid = ~np.isnan(y_pred_val)
+                        if mask_valid.sum() > 0:
+                            y_val_valid = y_val.values[mask_valid]
+                            y_pred_valid = y_pred_val[mask_valid]
+                            val_score = r2_score(y_val_valid, y_pred_valid)
+                            st.metric("🛡️ Validation R² Score", f"{val_score:.4f}")
+                            
+                            fig_val = px.scatter(
+                                x=y_val_valid, y=y_pred_valid,
+                                labels={'x': f'Actual {formula_target}', 'y': f'Predicted {formula_target}'},
+                                title='Validation: Predictions vs. Actual Values',
+                            )
+                            min_val = min(y_val_valid.min(), y_pred_valid.min())
+                            max_val = max(y_val_valid.max(), y_pred_valid.max())
+                            fig_val.add_trace(go.Scatter(
+                                x=[min_val, max_val], y=[min_val, max_val],
+                                mode='lines', name='Perfect Fit',
+                                line=dict(dash='dash', color='red', width=2)
+                            ))
+                            st.plotly_chart(fig_val, use_container_width=True)
+                        else:
+                            st.warning("⚠️ Could not evaluate formula on validation data points.")
+                    else:
+                        st.error("❌ PDF does not contain the required columns.")
+                except Exception as e:
+                    st.error(f"❌ Validation Error: {str(e)}")
 
         progress_bar.progress(1.0)
     except FormulaDiscoveryError as e:
@@ -476,19 +525,3 @@ Plain Text:
     finally:
         progress_bar.empty()
         status_text.empty()
-
-# === Formula Validation ===
-if 'formula_result' in st.session_state:
-    st.subheader("🛡️ Formula Validation")
-    validate_button = st.button("Validate on New Data")
-
-    if validate_button:
-        validation_files = st.file_uploader("📁 Upload Validation Excel files", accept_multiple_files=True, type=['xlsx', 'xls'], key="validation_uploader")
-        formula_validation.validate_formula(
-            formula_result=st.session_state.formula_result,
-            selected_method_key=st.session_state.selected_method_key,
-            formula_features=st.session_state.formula_features,
-            formula_target=st.session_state.formula_target,
-            validation_files=validation_files,
-            load_and_preprocess_data=load_and_preprocess_data
-        )
