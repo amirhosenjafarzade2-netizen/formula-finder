@@ -38,6 +38,7 @@ curve_fit_available = True  # scipy.optimize.curve_fit is always available
 class FormulaDiscoveryError(Exception):
     pass
 
+@st.cache_data
 def discover_formula(
     X: pd.DataFrame,
     y: pd.Series,
@@ -98,7 +99,6 @@ def discover_formula(
     # === Polynomial Regression (PolynomialFeatures + LinearRegression) ===
     if method == "poly" and poly_available:
         try:
-            # Scale features to stabilize polynomial regression
             scaler = StandardScaler()
             X_scaled = scaler.fit_transform(X_arr)
 
@@ -110,7 +110,6 @@ def discover_formula(
             y_pred = model.predict(X_poly)
             score = r2_score(y_arr, y_pred)
 
-            # Construct symbolic equation
             feature_names_poly = poly.get_feature_names_out(feature_names)
             terms = [sp.Float(coef) * sp.sympify(name.replace(" ", "*")) for coef, name in zip(model.coef_, feature_names_poly)]
             equation = sum(terms) + sp.Float(model.intercept_)
@@ -135,14 +134,13 @@ def discover_formula(
     # === Nonlinear Curve Fitting (scipy.optimize.curve_fit) ===
     if method == "curve_fit" and curve_fit_available:
         try:
-            # Define predefined model templates
             model_templates = {
                 "exponential": lambda X, a, b, c: a * np.exp(b * X[:, 0]) + c,
                 "sinusoidal": lambda X, a, b, c: a * np.sin(b * X[:, 0]) + c,
-                "logistic": lambda X, a, b, c: a / (1 + np.exp(-b * (X[:, 0] - c)))
+                "logistic": lambda X, a, b, c: a / (1 + np.exp(-b * (X[:, 0] - c))),
+                "power_law": lambda X, a, b, c: a * X[:, 0]**b + c
             }
 
-            # Handle custom model
             if nonlinear_model == "custom" and custom_model:
                 try:
                     expr = sp.sympify(custom_model)
@@ -157,16 +155,14 @@ def discover_formula(
                     raise FormulaDiscoveryError(f"Invalid custom model: {e}")
             else:
                 model_func = model_templates.get(nonlinear_model)
-                n_params = 3  # a, b, c for predefined models
+                n_params = 3
                 if not model_func:
                     raise FormulaDiscoveryError(f"Unknown model: {nonlinear_model}")
 
-            # Fit model
             popt, _ = curve_fit(model_func, X_arr, y_arr, maxfev=n_iterations * 100)
             y_pred = model_func(X_arr, *popt)
             score = r2_score(y_arr, y_pred)
 
-            # Construct symbolic equation
             if nonlinear_model == "custom" and custom_model:
                 equation = sp.sympify(custom_model)
                 subs_dict = {sp.Symbol(param): popt[i] for i, param in enumerate(params)}
@@ -179,6 +175,8 @@ def discover_formula(
                     equation = popt[0] * sp.sin(popt[1] * x0) + popt[2]
                 elif nonlinear_model == "logistic":
                     equation = popt[0] / (1 + sp.exp(-popt[1] * (x0 - popt[2])))
+                elif nonlinear_model == "power_law":
+                    equation = popt[0] * x0**popt[1] + popt[2]
                 else:
                     raise FormulaDiscoveryError("Model not implemented.")
 
@@ -223,6 +221,7 @@ def discover_formula(
         }
     raise FormulaDiscoveryError(f"Method '{method}' not available.")
 
+@st.cache_data
 def load_and_preprocess_data(uploaded_files, n_rows=None):
     """Load numeric Excel data or generate sample."""
     if not uploaded_files:
@@ -251,20 +250,44 @@ def load_and_preprocess_data(uploaded_files, n_rows=None):
         return pd.concat(dfs, ignore_index=True)
     return pd.DataFrame()
 
+def evaluate_formula(equation, X, feature_names, scaler=None, poly=None, model=None, method=""):
+    """Evaluate formula on given data."""
+    if method == "poly" and scaler and poly and model:
+        X_scaled = scaler.transform(X.values)
+        X_poly = poly.transform(X_scaled)
+        return model.predict(X_poly)
+    else:
+        y_pred = []
+        for idx in range(len(X)):
+            row = X.iloc[idx]
+            val_dict = {sp.Symbol(name): float(row[name]) for name in feature_names}
+            try:
+                pred_val = float(equation.subs(val_dict).evalf())
+                y_pred.append(pred_val)
+            except Exception:
+                y_pred.append(np.nan)
+        return np.array(y_pred)
+
 # === Streamlit UI ===
 st.set_page_config(page_title="Formula Discovery App", layout="wide")
 
-st.title("🧮 Standalone Formula Discovery App")
+st.title("🧮 Formula Discovery App")
+st.markdown("""
+Welcome to the Formula Discovery App! Upload an Excel file with numeric data, select features and a target variable, 
+and choose a method to discover a mathematical formula. After discovering a formula, you can validate it on new Excel data 
+or edit the formula interactively. Use the sidebar to configure settings.
+""")
 
 st.sidebar.header("⚙️ Config")
-n_iterations = st.sidebar.number_input("Iterations", min_value=10, value=100, help="Number of search iterations")
-max_complexity = st.sidebar.number_input("Max Complexity", min_value=1, value=10, help="Max equation size")
+st.sidebar.markdown("Adjust parameters for formula discovery.")
+n_iterations = st.sidebar.number_input("Iterations", min_value=10, value=100, help="Number of search iterations for PySR or curve fitting")
+max_complexity = st.sidebar.number_input("Max Complexity", min_value=1, value=10, help="Maximum equation size for PySR")
 min_rows = st.sidebar.number_input("Min Rows", min_value=5, value=10, help="Minimum data points required")
 poly_degree = st.sidebar.number_input("Polynomial Degree", min_value=1, value=2, help="Degree for Polynomial Regression")
 nonlinear_model = st.sidebar.selectbox(
     "Nonlinear Model",
-    options=["exponential", "sinusoidal", "logistic", "custom"],
-    help="Model type for Nonlinear Curve Fitting"
+    options=["exponential", "sinusoidal", "logistic", "power_law", "custom"],
+    help="Model type for Nonlinear Curve Fitting (e.g., exponential: a*e^(b*x)+c, power_law: a*x^b+c)"
 )
 custom_model = st.sidebar.text_input(
     "Custom Model (sympy syntax)",
@@ -272,8 +295,8 @@ custom_model = st.sidebar.text_input(
     help="Enter a custom model, e.g., 'a * x1 + b * sin(x2) + c'. Leave blank for predefined models."
 )
 
-uploaded_files = st.file_uploader("📁 Upload Excel files", accept_multiple_files=True, type=['xlsx', 'xls'])
-n_rows_input = st.number_input("Sample rows (0 for all)", min_value=0, value=0)
+uploaded_files = st.file_uploader("📁 Upload Excel files", accept_multiple_files=True, type=['xlsx', 'xls'], help="Upload one or more Excel files with numeric data.")
+n_rows_input = st.number_input("Sample rows (0 for all)", min_value=0, value=0, help="Number of rows to sample (0 to use all)")
 n_rows = None if n_rows_input == 0 else n_rows_input
 
 if st.button("Load Data"):
@@ -293,9 +316,9 @@ params = df.select_dtypes(include=[np.number]).columns.tolist()
 
 col1, col2 = st.columns(2)
 with col1:
-    formula_features = st.multiselect("🔧 Select Features", options=params, default=params[:-1] if len(params) > 1 else [])
+    formula_features = st.multiselect("🔧 Select Features", options=params, default=params[:-1] if len(params) > 1 else [], help="Select input variables for the formula")
 with col2:
-    formula_target = st.selectbox("🎯 Target Variable", options=params)
+    formula_target = st.selectbox("🎯 Target Variable", options=params, help="Select the variable to predict")
 
 if not formula_features or formula_target not in params or formula_target in formula_features:
     st.error("❌ Select valid features (excluding target).")
@@ -309,17 +332,17 @@ available_methods.extend(["poly", "curve_fit", "linear"])
 
 # Method choice
 method_options = {
-    "pysr": "PySR (Evolutionary Symbolic Regression)",
-    "poly": f"Polynomial Regression (Degree {poly_degree})",
-    "curve_fit": f"Nonlinear Curve Fitting ({nonlinear_model})",
-    "linear": "Linear Regression"
+    "pysr": "PySR (Evolutionary Symbolic Regression): Finds complex formulas using genetic algorithms",
+    "poly": f"Polynomial Regression (Degree {poly_degree}): Fits a polynomial of specified degree",
+    "curve_fit": f"Nonlinear Curve Fitting ({nonlinear_model}): Fits a specific nonlinear model",
+    "linear": "Linear Regression: Fits a simple linear model"
 }
 selected_method_key = st.radio(
     "📊 Select Method",
     options=available_methods,
     format_func=lambda key: method_options[key],
     index=0,
-    help="Choose the discovery method: PySR for complex formulas, Polynomial for polynomial fits, Curve for specific nonlinear models, Linear for simple fits."
+    help="Choose a method based on your data. PySR is best for complex relationships, Polynomial for smooth curves, Curve Fitting for specific models, Linear for simple relationships."
 )
 
 run_formula = st.button("🚀 Discover Formula", type="primary")
@@ -382,37 +405,22 @@ if run_formula:
             st.write(f"**Features Used:** {', '.join(formula_result['feature_names'])}")
 
         # Compute predictions for plotting
-        if selected_method_key == "poly":
-            # Use the fitted model for polynomial regression
-            scaler = formula_result.get("scaler")
-            poly = formula_result.get("poly")
-            model = formula_result.get("model")
-            X_scaled = scaler.transform(X_formula.values)
-            X_poly = poly.transform(X_scaled)
-            y_pred = model.predict(X_poly)
-        else:
-            # Use sympy evaluation for other methods
-            equation = formula_result['equation']
-            y_pred = []
-            for idx in range(len(X_formula)):
-                row = X_formula.iloc[idx]
-                val_dict = {sp.Symbol(name): float(row[name]) for name in formula_features}
-                try:
-                    pred_val = float(equation.subs(val_dict).evalf())
-                    y_pred.append(pred_val)
-                except Exception:
-                    y_pred.append(np.nan)
-            y_pred = np.array(y_pred)
+        y_pred = evaluate_formula(
+            formula_result['equation'], X_formula, formula_result['feature_names'],
+            scaler=formula_result.get("scaler"), poly=formula_result.get("poly"), model=formula_result.get("model"),
+            method=selected_method_key
+        )
 
         mask_valid = ~np.isnan(y_pred)
         if mask_valid.sum() > 0:
             y_actual_valid = y_formula.values[mask_valid]
             y_pred_valid = y_pred[mask_valid]
 
+            # Scatter plot
             fig = px.scatter(
                 x=y_actual_valid, y=y_pred_valid,
                 labels={'x': f'Actual {formula_target}', 'y': f'Predicted {formula_target}'},
-                title=f'Predictions vs. Actual Values ({formula_result["method"]})',
+                title=f'Predictions vs. Actual Values ({formula_result["method"]})'
             )
             min_val = min(y_actual_valid.min(), y_pred_valid.min())
             max_val = max(y_actual_valid.max(), y_pred_valid.max())
@@ -422,6 +430,16 @@ if run_formula:
                 line=dict(dash='dash', color='red', width=2)
             ))
             st.plotly_chart(fig, use_container_width=True)
+
+            # Residual plot
+            residuals = y_actual_valid - y_pred_valid
+            fig_res = px.scatter(
+                x=y_actual_valid, y=residuals,
+                labels={'x': f'Actual {formula_target}', 'y': 'Residuals'},
+                title=f'Residuals vs. Actual Values ({formula_result["method"]})'
+            )
+            fig_res.add_hline(y=0, line_dash="dash", line_color="red")
+            st.plotly_chart(fig_res, use_container_width=True)
         else:
             st.warning("⚠️ Could not evaluate formula on data points.")
 
@@ -446,7 +464,49 @@ Plain Text:
             "text/plain"
         )
 
-        # Store formula result in session state for validation
+        # Interactive formula editor
+        st.subheader("✏️ Edit Formula")
+        edited_formula = st.text_input(
+            "Edit Formula (sympy syntax)",
+            value=formula_result['str_formula'],
+            help="Modify the formula (e.g., change coefficients) and see updated predictions."
+        )
+        if st.button("🔄 Evaluate Edited Formula"):
+            try:
+                edited_eq = sp.sympify(edited_formula)
+                y_pred_edited = evaluate_formula(
+                    edited_eq, X_formula, formula_result['feature_names'],
+                    scaler=formula_result.get("scaler") if selected_method_key != "poly" else None,
+                    poly=formula_result.get("poly") if selected_method_key != "poly" else None,
+                    model=formula_result.get("model") if selected_method_key != "poly" else None,
+                    method=""
+                )
+                mask_valid_edited = ~np.isnan(y_pred_edited)
+                if mask_valid_edited.sum() > 0:
+                    y_actual_valid_edited = y_formula.values[mask_valid_edited]
+                    y_pred_valid_edited = y_pred_edited[mask_valid_edited]
+                    edited_score = r2_score(y_actual_valid_edited, y_pred_valid_edited)
+                    st.metric("📊 Edited Formula R² Score", f"{edited_score:.4f}")
+
+                    fig_edited = px.scatter(
+                        x=y_actual_valid_edited, y=y_pred_valid_edited,
+                        labels={'x': f'Actual {formula_target}', 'y': f'Predicted {formula_target}'},
+                        title='Edited Formula: Predictions vs. Actual Values'
+                    )
+                    min_val = min(y_actual_valid_edited.min(), y_pred_valid_edited.min())
+                    max_val = max(y_actual_valid_edited.max(), y_pred_valid_edited.max())
+                    fig_edited.add_trace(go.Scatter(
+                        x=[min_val, max_val], y=[min_val, max_val],
+                        mode='lines', name='Perfect Fit',
+                        line=dict(dash='dash', color='red', width=2)
+                    ))
+                    st.plotly_chart(fig_edited, use_container_width=True)
+                else:
+                    st.warning("⚠️ Could not evaluate edited formula.")
+            except Exception as e:
+                st.error(f"❌ Invalid formula syntax: {str(e)}")
+
+        # Store formula result for validation
         st.session_state.formula_result = formula_result
         st.session_state.selected_method_key = selected_method_key
 
@@ -461,75 +521,88 @@ Plain Text:
 
 # Validation module
 if 'formula_result' in st.session_state:
-    if st.button("🛡️ Validate Formula on New Data"):
+    validation_placeholder = st.empty()
+    if validation_placeholder.button("🛡️ Validate Formula on New Data"):
         st.session_state.show_validation_uploader = True
 
     if st.session_state.get('show_validation_uploader', False):
-        validation_files = st.file_uploader(
-            "📁 Upload Excel file for Validation",
-            accept_multiple_files=True,
-            type=['xlsx', 'xls'],
-            key='validation_uploader'
-        )
-        if validation_files:
-            try:
-                # Load validation data using the same preprocessing function
-                val_df = load_and_preprocess_data(validation_files)
-                if val_df.empty:
-                    raise ValueError("No valid numeric data found in uploaded Excel file.")
+        with validation_placeholder.container():
+            st.markdown("### Validate Formula")
+            validation_files = st.file_uploader(
+                "📁 Upload Excel file for Validation",
+                accept_multiple_files=True,
+                type=['xlsx', 'xls'],
+                key='validation_uploader',
+                help="Upload an Excel file with the same features and target as the original data."
+            )
+            if validation_files:
+                try:
+                    val_df = load_and_preprocess_data(validation_files)
+                    if val_df.empty:
+                        raise ValueError("No valid numeric data found in uploaded Excel file.")
 
-                formula_result = st.session_state.formula_result
-                selected_method_key = st.session_state.selected_method_key
-                required_cols = formula_result['feature_names'] + [formula_result['target_name']]
+                    formula_result = st.session_state.formula_result
+                    selected_method_key = st.session_state.selected_method_key
+                    required_cols = formula_result['feature_names'] + [formula_result['target_name']]
 
-                if set(required_cols).issubset(val_df.columns):
-                    X_val = val_df[formula_result['feature_names']]
-                    y_val = val_df[formula_result['target_name']]
-
-                    # Compute predictions for validation data
-                    if selected_method_key == "poly":
-                        scaler = formula_result.get("scaler")
-                        poly = formula_result.get("poly")
-                        model = formula_result.get("model")
-                        X_scaled = scaler.transform(X_val.values)
-                        X_poly = poly.transform(X_scaled)
-                        y_pred_val = model.predict(X_poly)
-                    else:
-                        equation = formula_result['equation']
-                        y_pred_val = []
-                        for idx in range(len(X_val)):
-                            row = X_val.iloc[idx]
-                            val_dict = {sp.Symbol(name): float(row[name]) for name in formula_result['feature_names']}
-                            try:
-                                pred_val = float(equation.subs(val_dict).evalf())
-                                y_pred_val.append(pred_val)
-                            except Exception:
-                                y_pred_val.append(np.nan)
-                        y_pred_val = np.array(y_pred_val)
-
-                    mask_valid = ~np.isnan(y_pred_val)
-                    if mask_valid.sum() > 0:
-                        y_val_valid = y_val.values[mask_valid]
-                        y_pred_valid = y_pred_val[mask_valid]
-                        val_score = r2_score(y_val_valid, y_pred_valid)
-                        st.metric("🛡️ Validation R² Score", f"{val_score:.4f}")
-
-                        fig_val = px.scatter(
-                            x=y_val_valid, y=y_pred_valid,
-                            labels={'x': f'Actual {formula_result["target_name"]}', 'y': f'Predicted {formula_result["target_name"]}'},
-                            title=f'Validation: Predictions vs. Actual Values ({formula_result["method"]})',
+                    # Column mapping for validation data
+                    st.write("Map columns if names differ from original data:")
+                    col_mapping = {}
+                    for orig_col in required_cols:
+                        mapped_col = st.selectbox(
+                            f"Select column for '{orig_col}'",
+                            options=val_df.columns,
+                            key=f"map_{orig_col}",
+                            help=f"Choose the column in the validation file that corresponds to '{orig_col}'"
                         )
-                        min_val = min(y_val_valid.min(), y_pred_valid.min())
-                        max_val = max(y_val_valid.max(), y_pred_valid.max())
-                        fig_val.add_trace(go.Scatter(
-                            x=[min_val, max_val], y=[min_val, max_val],
-                            mode='lines', name='Perfect Fit',
-                            line=dict(dash='dash', color='red', width=2)
-                        ))
-                        st.plotly_chart(fig_val, use_container_width=True)
+                        col_mapping[orig_col] = mapped_col
+
+                    # Rename columns in validation data
+                    val_df_mapped = val_df.rename(columns={v: k for k, v in col_mapping.items()})
+
+                    if set(required_cols).issubset(val_df_mapped.columns):
+                        X_val = val_df_mapped[formula_result['feature_names']]
+                        y_val = val_df_mapped[formula_result['target_name']]
+
+                        y_pred_val = evaluate_formula(
+                            formula_result['equation'], X_val, formula_result['feature_names'],
+                            scaler=formula_result.get("scaler"), poly=formula_result.get("poly"), model=formula_result.get("model"),
+                            method=selected_method_key
+                        )
+
+                        mask_valid = ~np.isnan(y_pred_val)
+                        if mask_valid.sum() > 0:
+                            y_val_valid = y_val.values[mask_valid]
+                            y_pred_valid = y_pred_val[mask_valid]
+                            val_score = r2_score(y_val_valid, y_pred_valid)
+                            st.metric("🛡️ Validation R² Score", f"{val_score:.4f}")
+
+                            fig_val = px.scatter(
+                                x=y_val_valid, y=y_pred_valid,
+                                labels={'x': f'Actual {formula_result["target_name"]}', 'y': f'Predicted {formula_result["target_name"]}'},
+                                title=f'Validation: Predictions vs. Actual Values ({formula_result["method"]})'
+                            )
+                            min_val = min(y_val_valid.min(), y_pred_valid.min())
+                            max_val = max(y_val_valid.max(), y_pred_valid.max())
+                            fig_val.add_trace(go.Scatter(
+                                x=[min_val, max_val], y=[min_val, max_val],
+                                mode='lines', name='Perfect Fit',
+                                line=dict(dash='dash', color='red', width=2)
+                            ))
+                            st.plotly_chart(fig_val, use_container_width=True)
+
+                            # Validation residual plot
+                            residuals_val = y_val_valid - y_pred_valid
+                            fig_res_val = px.scatter(
+                                x=y_val_valid, y=residuals_val,
+                                labels={'x': f'Actual {formula_result["target_name"]}', 'y': 'Residuals'},
+                                title=f'Validation: Residuals vs. Actual Values ({formula_result["method"]})'
+                            )
+                            fig_res_val.add_hline(y=0, line_dash="dash", line_color="red")
+                            st.plotly_chart(fig_res_val, use_container_width=True)
+                        else:
+                            st.warning("⚠️ Could not evaluate formula on validation data points.")
                     else:
-                        st.warning("⚠️ Could not evaluate formula on validation data points.")
-                else:
-                    st.error(f"❌ Validation Excel file must contain columns: {', '.join(required_cols)}")
-            except Exception as e:
-                st.error(f"❌ Validation Error: {str(e)}")
+                        st.error(f"❌ Validation Excel file must contain columns: {', '.join(required_cols)}")
+                except Exception as e:
+                    st.error(f"❌ Validation Error: {str(e)}")
