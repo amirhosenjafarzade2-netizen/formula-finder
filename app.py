@@ -21,17 +21,17 @@ import uuid
 import genetic_poly_discovery
 import formula_validation
 
-# Fix Julia env (for Streamlit Cloud)
-os.environ['JULIA_DEPOT_PATH'] = '/tmp/julia'
-os.environ['JULIA_LOAD_PATH'] = '/tmp/julia'
+# Fix Julia env for Streamlit Cloud
+os.environ['JULIA_DEPOT_PATH'] = os.path.expanduser('~/.julia')
+os.environ['JULIA_LOAD_PATH'] = os.path.expanduser('~/.julia')
 
 # === Backend detection ===
 pysr_available = False
 try:
     from pysr import PySRRegressor
     pysr_available = True
-except Exception:
-    pass
+except Exception as e:
+    st.warning(f"PySR not available: {e}")
 
 linear_available = True  # Always available
 poly_available = True    # PolynomialFeatures is always available with sklearn
