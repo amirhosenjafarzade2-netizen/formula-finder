@@ -18,7 +18,6 @@ from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 from scipy.optimize import curve_fit
 import uuid
-import pdfplumber
 
 # Fix Julia env (for Streamlit Cloud)
 os.environ['JULIA_DEPOT_PATH'] = '/tmp/julia'
@@ -447,75 +446,9 @@ Plain Text:
             "text/plain"
         )
 
-        # Extra module for formula validation
-        if st.button("🛡️ Validate Formula on New Data"):
-            validation_file = st.file_uploader("📁 Upload PDF for Validation", type=['pdf'])
-            if validation_file:
-                try:
-                    with pdfplumber.open(validation_file) as pdf:
-                        if pdf.pages:
-                            page = pdf.pages[0]
-                            table = page.extract_table()
-                            if table:
-                                val_df = pd.DataFrame(table[1:], columns=table[0])
-                                val_df = val_df.apply(pd.to_numeric, errors='coerce')
-                                val_df = val_df.dropna()
-                            else:
-                                raise ValueError("No table found in PDF.")
-                        else:
-                            raise ValueError("Empty PDF.")
-                    
-                    required_cols = formula_features + [formula_target]
-                    if set(required_cols).issubset(val_df.columns):
-                        X_val = val_df[formula_features]
-                        y_val = val_df[formula_target]
-                        
-                        if selected_method_key == "poly":
-                            scaler = formula_result.get("scaler")
-                            poly = formula_result.get("poly")
-                            model = formula_result.get("model")
-                            X_scaled = scaler.transform(X_val.values)
-                            X_poly = poly.transform(X_scaled)
-                            y_pred_val = model.predict(X_poly)
-                        else:
-                            equation = formula_result['equation']
-                            y_pred_val = []
-                            for idx in range(len(X_val)):
-                                row = X_val.iloc[idx]
-                                val_dict = {sp.Symbol(name): float(row[name]) for name in formula_features}
-                                try:
-                                    pred_val = float(equation.subs(val_dict).evalf())
-                                    y_pred_val.append(pred_val)
-                                except Exception:
-                                    y_pred_val.append(np.nan)
-                            y_pred_val = np.array(y_pred_val)
-                        
-                        mask_valid = ~np.isnan(y_pred_val)
-                        if mask_valid.sum() > 0:
-                            y_val_valid = y_val.values[mask_valid]
-                            y_pred_valid = y_pred_val[mask_valid]
-                            val_score = r2_score(y_val_valid, y_pred_valid)
-                            st.metric("🛡️ Validation R² Score", f"{val_score:.4f}")
-                            
-                            fig_val = px.scatter(
-                                x=y_val_valid, y=y_pred_valid,
-                                labels={'x': f'Actual {formula_target}', 'y': f'Predicted {formula_target}'},
-                                title='Validation: Predictions vs. Actual Values',
-                            )
-                            min_val = min(y_val_valid.min(), y_pred_valid.min())
-                            max_val = max(y_val_valid.max(), y_pred_valid.max())
-                            fig_val.add_trace(go.Scatter(
-                                x=[min_val, max_val], y=[min_val, max_val],
-                                mode='lines', name='Perfect Fit',
-                                line=dict(dash='dash', color='red', width=2)
-                            ))
-                            st.plotly_chart(fig_val, use_container_width=True)
-                        else:
-                            st.warning("⚠️ Could not evaluate formula on validation data points.")
-                    else:
-                        st.error("❌ PDF does not contain the required columns.")
-                except Exception as e:
-                    st.error(f"❌ Validation Error: {str(e)}")
+        # Store formula result in session state for validation
+        st.session_state.formula_result = formula_result
+        st.session_state.selected_method_key = selected_method_key
 
         progress_bar.progress(1.0)
     except FormulaDiscoveryError as e:
@@ -525,3 +458,78 @@ Plain Text:
     finally:
         progress_bar.empty()
         status_text.empty()
+
+# Validation module
+if 'formula_result' in st.session_state:
+    if st.button("🛡️ Validate Formula on New Data"):
+        st.session_state.show_validation_uploader = True
+
+    if st.session_state.get('show_validation_uploader', False):
+        validation_files = st.file_uploader(
+            "📁 Upload Excel file for Validation",
+            accept_multiple_files=True,
+            type=['xlsx', 'xls'],
+            key='validation_uploader'
+        )
+        if validation_files:
+            try:
+                # Load validation data using the same preprocessing function
+                val_df = load_and_preprocess_data(validation_files)
+                if val_df.empty:
+                    raise ValueError("No valid numeric data found in uploaded Excel file.")
+
+                formula_result = st.session_state.formula_result
+                selected_method_key = st.session_state.selected_method_key
+                required_cols = formula_result['feature_names'] + [formula_result['target_name']]
+
+                if set(required_cols).issubset(val_df.columns):
+                    X_val = val_df[formula_result['feature_names']]
+                    y_val = val_df[formula_result['target_name']]
+
+                    # Compute predictions for validation data
+                    if selected_method_key == "poly":
+                        scaler = formula_result.get("scaler")
+                        poly = formula_result.get("poly")
+                        model = formula_result.get("model")
+                        X_scaled = scaler.transform(X_val.values)
+                        X_poly = poly.transform(X_scaled)
+                        y_pred_val = model.predict(X_poly)
+                    else:
+                        equation = formula_result['equation']
+                        y_pred_val = []
+                        for idx in range(len(X_val)):
+                            row = X_val.iloc[idx]
+                            val_dict = {sp.Symbol(name): float(row[name]) for name in formula_result['feature_names']}
+                            try:
+                                pred_val = float(equation.subs(val_dict).evalf())
+                                y_pred_val.append(pred_val)
+                            except Exception:
+                                y_pred_val.append(np.nan)
+                        y_pred_val = np.array(y_pred_val)
+
+                    mask_valid = ~np.isnan(y_pred_val)
+                    if mask_valid.sum() > 0:
+                        y_val_valid = y_val.values[mask_valid]
+                        y_pred_valid = y_pred_val[mask_valid]
+                        val_score = r2_score(y_val_valid, y_pred_valid)
+                        st.metric("🛡️ Validation R² Score", f"{val_score:.4f}")
+
+                        fig_val = px.scatter(
+                            x=y_val_valid, y=y_pred_valid,
+                            labels={'x': f'Actual {formula_result["target_name"]}', 'y': f'Predicted {formula_result["target_name"]}'},
+                            title=f'Validation: Predictions vs. Actual Values ({formula_result["method"]})',
+                        )
+                        min_val = min(y_val_valid.min(), y_pred_valid.min())
+                        max_val = max(y_val_valid.max(), y_pred_valid.max())
+                        fig_val.add_trace(go.Scatter(
+                            x=[min_val, max_val], y=[min_val, max_val],
+                            mode='lines', name='Perfect Fit',
+                            line=dict(dash='dash', color='red', width=2)
+                        ))
+                        st.plotly_chart(fig_val, use_container_width=True)
+                    else:
+                        st.warning("⚠️ Could not evaluate formula on validation data points.")
+                else:
+                    st.error(f"❌ Validation Excel file must contain columns: {', '.join(required_cols)}")
+            except Exception as e:
+                st.error(f"❌ Validation Error: {str(e)}")
