@@ -1,6 +1,6 @@
 """
 Standalone Streamlit App for Formula Discovery.
-Supports PySR (if Julia available), PolynomialFeatures, Nonlinear Curve Fitting (scipy), and Linear Regression.
+Supports PySR (if Julia available), Genetic Polynomial, PolynomialFeatures, Nonlinear Curve Fitting (scipy), Linear Regression, and Formula Validation.
 Run with: streamlit run formula_app.py
 """
 
@@ -18,6 +18,8 @@ from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 from scipy.optimize import curve_fit
 import uuid
+import genetic_poly_discovery
+import formula_validation
 
 # Fix Julia env (for Streamlit Cloud)
 os.environ['JULIA_DEPOT_PATH'] = '/tmp/julia'
@@ -94,6 +96,18 @@ def discover_formula(
             }
         except Exception as e:
             raise FormulaDiscoveryError(f"PySR failed: {e}")
+
+    # === Genetic Polynomial (via genetic_poly_discovery module) ===
+    if method == "genetic_poly" and pysr_available:
+        try:
+            return genetic_poly_discovery.discover_genetic_poly(
+                X, y, feature_names,
+                max_complexity=max_complexity,
+                n_iterations=n_iterations,
+                target_name=target_name
+            )
+        except Exception as e:
+            raise FormulaDiscoveryError(f"Genetic Polynomial failed: {e}")
 
     # === Polynomial Regression (PolynomialFeatures + LinearRegression) ===
     if method == "poly" and poly_available:
@@ -305,11 +319,13 @@ if not formula_features or formula_target not in params or formula_target in for
 available_methods = []
 if pysr_available:
     available_methods.append("pysr")
+    available_methods.append("genetic_poly")
 available_methods.extend(["poly", "curve_fit", "linear"])
 
 # Method choice
 method_options = {
     "pysr": "PySR (Evolutionary Symbolic Regression)",
+    "genetic_poly": "Genetic Algorithm (Polynomial)",
     "poly": f"Polynomial Regression (Degree {poly_degree})",
     "curve_fit": f"Nonlinear Curve Fitting ({nonlinear_model})",
     "linear": "Linear Regression"
@@ -319,7 +335,7 @@ selected_method_key = st.radio(
     options=available_methods,
     format_func=lambda key: method_options[key],
     index=0,
-    help="Choose the discovery method: PySR for complex formulas, Polynomial for polynomial fits, Curve for specific nonlinear models, Linear for simple fits."
+    help="Choose the discovery method: PySR for complex formulas, Genetic for polynomial via genetic alg, Polynomial for polynomial fits, Curve for specific nonlinear models, Linear for simple fits."
 )
 
 run_formula = st.button("🚀 Discover Formula", type="primary")
@@ -446,6 +462,12 @@ Plain Text:
             "text/plain"
         )
 
+        # Store for validation
+        st.session_state.formula_result = formula_result
+        st.session_state.selected_method_key = selected_method_key
+        st.session_state.formula_features = formula_features
+        st.session_state.formula_target = formula_target
+
         progress_bar.progress(1.0)
     except FormulaDiscoveryError as e:
         st.error(f"❌ Discovery Error: {str(e)}")
@@ -454,3 +476,19 @@ Plain Text:
     finally:
         progress_bar.empty()
         status_text.empty()
+
+# === Formula Validation ===
+if 'formula_result' in st.session_state:
+    st.subheader("🛡️ Formula Validation")
+    validate_button = st.button("Validate on New Data")
+
+    if validate_button:
+        validation_files = st.file_uploader("📁 Upload Validation Excel files", accept_multiple_files=True, type=['xlsx', 'xls'], key="validation_uploader")
+        formula_validation.validate_formula(
+            formula_result=st.session_state.formula_result,
+            selected_method_key=st.session_state.selected_method_key,
+            formula_features=st.session_state.formula_features,
+            formula_target=st.session_state.formula_target,
+            validation_files=validation_files,
+            load_and_preprocess_data=load_and_preprocess_data
+        )
