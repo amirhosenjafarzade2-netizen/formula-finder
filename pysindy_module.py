@@ -39,11 +39,11 @@ def discover_pysindy(
     optimizer = STLSQ(threshold=0.1)  # Threshold for sparsity (tune lower for more terms)
     optimizer.fit(Theta, y_2d)
     
-    # Predict: Theta @ coef_ (coef_ is now (n_feat, 1))
-    y_pred = Theta @ optimizer.coef_
+    # Predict: Theta @ coef_.T (since coef_ is (1, n_features) for single output)
+    y_pred = Theta @ optimizer.coef_.T
     score = r2_score(y_arr, y_pred.ravel())
     
-    # Get coefficients and build equation
+    # Get coefficients and build equation (flatten to 1D)
     coeffs = optimizer.coef_.flatten()
     feature_names_lib = library.get_feature_names(feature_names)
     
