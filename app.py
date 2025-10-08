@@ -14,7 +14,7 @@ import os
 from typing import List, Dict, Any
 import sympy as sp
 from sklearn.metrics import r2_score
-from sklearn.linear_model import LinearRegression, Lasso
+from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 from scipy.optimize import curve_fit
 import uuid
@@ -29,21 +29,6 @@ try:
     from pysr import PySRRegressor
     pysr_available = True
 except Exception:
-    pass
-
-# Detect new methods
-gplearn_available = False
-try:
-    from gplearn_module import discover_gplearn
-    gplearn_available = True
-except ImportError:
-    pass
-
-pysindy_available = False
-try:
-    from pysindy_module import discover_pysindy
-    pysindy_available = True
-except ImportError:
     pass
 
 linear_available = True  # Always available
@@ -64,9 +49,7 @@ def discover_formula(
     method: str = "pysr",
     poly_degree: int = 2,
     nonlinear_model: str = "exponential",
-    custom_model: str = None,
-    lasso_alpha: float = 0.0,
-    parsimony_coeff: float = 0.0
+    custom_model: str = None
 ) -> Dict[str, Any]:
     X_arr = X.values.astype(np.float64)
     y_arr = y.values.astype(np.float64)
@@ -77,19 +60,16 @@ def discover_formula(
     # === PySR (Evolutionary Symbolic Regression) ===
     if method == "pysr" and pysr_available:
         try:
-            kwargs = {
-                "niterations": n_iterations,
-                "binary_operators": ["add", "sub", "mul", "div"],
-                "unary_operators": ["exp", "log", "sin", "cos", "sqrt"],
-                "maxsize": max_complexity,
-                "loss": "(x, y) -> (x - y)^2",
-                "model_selection": "best",
-                "verbosity": 0,
-                "progress": False
-            }
-            if parsimony_coeff > 0:
-                kwargs["parsimony"] = parsimony_coeff
-            model = PySRRegressor(**kwargs)
+            model = PySRRegressor(
+                niterations=n_iterations,
+                binary_operators=["add", "sub", "mul", "div"],
+                unary_operators=["exp", "log", "sin", "cos", "sqrt"],
+                maxsize=max_complexity,
+                loss="(x, y) -> (x - y)^2",
+                model_selection="best",
+                verbosity=0,
+                progress=False
+            )
             model.fit(X_arr, y_arr, variable_names=feature_names)
 
             y_pred = model.predict(X_arr)
@@ -116,15 +96,7 @@ def discover_formula(
         except Exception as e:
             raise FormulaDiscoveryError(f"PySR failed: {e}")
 
-    # === gplearn ===
-    if method == "gplearn" and gplearn_available:
-        return discover_gplearn(X, y, feature_names, n_iterations, max_complexity, target_name)
-
-    # === PySINDy ===
-    if method == "pysindy" and pysindy_available:
-        return discover_pysindy(X, y, feature_names, poly_degree, target_name)
-
-    # === Polynomial Regression (PolynomialFeatures + LinearRegression/Lasso) ===
+    # === Polynomial Regression (PolynomialFeatures + LinearRegression) ===
     if method == "poly" and poly_available:
         try:
             scaler = StandardScaler()
@@ -133,35 +105,25 @@ def discover_formula(
             poly = PolynomialFeatures(degree=poly_degree, include_bias=False)
             X_poly = poly.fit_transform(X_scaled)
 
-            if lasso_alpha > 0:
-                model = Lasso(alpha=lasso_alpha, max_iter=10000)
-                model.fit(X_poly, y_arr)
-            else:
-                model = LinearRegression()
-                model.fit(X_poly, y_arr)
+            model = LinearRegression()
+            model.fit(X_poly, y_arr)
             y_pred = model.predict(X_poly)
             score = r2_score(y_arr, y_pred)
 
             feature_names_poly = poly.get_feature_names_out(feature_names)
-            # Filter near-zero coefficients for sparsity
-            terms = []
-            for coef, name in zip(model.coef_, feature_names_poly):
-                if abs(coef) > 1e-6:  # Threshold to ignore tiny coeffs
-                    terms.append(sp.Float(coef) * sp.sympify(name.replace(" ", "*")))
+            terms = [sp.Float(coef) * sp.sympify(name.replace(" ", "*")) for coef, name in zip(model.coef_, feature_names_poly)]
             equation = sum(terms) + sp.Float(model.intercept_)
-            complexity = len(terms) + 1 if terms else 1
-
-            str_formula = str(sp.simplify(equation))
+            complexity = len(feature_names_poly) + 1
 
             return {
                 "equation": equation,
-                "str_formula": str_formula,
+                "str_formula": str(sp.simplify(equation)),
                 "score": float(score),
                 "complexity": int(complexity),
                 "feature_names": feature_names,
                 "target_name": target_name,
-                "is_linear": lasso_alpha == 0,
-                "method": f"Polynomial Regression (Degree {poly_degree}){' + Lasso' if lasso_alpha > 0 else ''}",
+                "is_linear": False,
+                "method": f"Polynomial Regression (Degree {poly_degree})",
                 "scaler": scaler,
                 "poly": poly,
                 "model": model
@@ -294,8 +256,6 @@ def evaluate_formula(equation, X, feature_names, scaler=None, poly=None, model=N
         X_scaled = scaler.transform(X.values)
         X_poly = poly.transform(X_scaled)
         return model.predict(X_poly)
-    elif method == "gplearn" and model is not None:
-        return model.predict(X.values.astype(np.float64))
     else:
         y_pred = []
         for idx in range(len(X)):
@@ -324,20 +284,6 @@ n_iterations = st.sidebar.number_input("Iterations", min_value=10, value=100, he
 max_complexity = st.sidebar.number_input("Max Complexity", min_value=1, value=10, help="Maximum equation size for PySR")
 min_rows = st.sidebar.number_input("Min Rows", min_value=5, value=10, help="Minimum data points required")
 poly_degree = st.sidebar.number_input("Polynomial Degree", min_value=1, value=2, help="Degree for Polynomial Regression")
-
-# New options for Lasso and Parsimony
-use_lasso = st.sidebar.checkbox("Use Lasso for Polynomial (Sparsity)", value=False, help="Enables sparse polynomial fitting for shorter formulas")
-if use_lasso:
-    lasso_alpha = st.sidebar.number_input("Lasso Alpha", min_value=0.0, value=0.1, help="Regularization strength (higher = sparser/shorter)")
-else:
-    lasso_alpha = 0.0
-
-use_parsimony = st.sidebar.checkbox("Use Parsimony for PySR", value=False, help="Penalizes long formulas in PySR for brevity")
-if use_parsimony:
-    parsimony_coeff = st.sidebar.number_input("Parsimony Coefficient", min_value=0.0, value=0.01, help="Penalty for complexity (higher = shorter)")
-else:
-    parsimony_coeff = 0.0
-
 nonlinear_model = st.sidebar.selectbox(
     "Nonlinear Model",
     options=["exponential", "sinusoidal", "logistic", "power_law", "custom"],
@@ -382,18 +328,12 @@ if not formula_features or formula_target not in params or formula_target in for
 available_methods = []
 if pysr_available:
     available_methods.append("pysr")
-if gplearn_available:
-    available_methods.append("gplearn")
-if pysindy_available:
-    available_methods.append("pysindy")
 available_methods.extend(["poly", "curve_fit", "linear"])
 
 # Method choice
 method_options = {
     "pysr": "PySR (Evolutionary Symbolic Regression): Finds complex formulas using genetic algorithms",
-    "gplearn": "GPlearn (Genetic Programming): Evolves interpretable expressions with parsimony",
-    "pysindy": "PySINDy (Sparse Identification): Discovers sparse dynamical equations",
-    "poly": f"Polynomial Regression (Degree {poly_degree}){' + Lasso' if lasso_alpha > 0 else ''}: Fits a polynomial of specified degree",
+    "poly": f"Polynomial Regression (Degree {poly_degree}): Fits a polynomial of specified degree",
     "curve_fit": f"Nonlinear Curve Fitting ({nonlinear_model}): Fits a specific nonlinear model",
     "linear": "Linear Regression: Fits a simple linear model"
 }
@@ -436,9 +376,7 @@ if run_formula:
             method=selected_method_key,
             poly_degree=poly_degree,
             nonlinear_model=nonlinear_model,
-            custom_model=custom_model,
-            lasso_alpha=lasso_alpha,
-            parsimony_coeff=parsimony_coeff
+            custom_model=custom_model
         )
 
         progress_bar.progress(0.8)
