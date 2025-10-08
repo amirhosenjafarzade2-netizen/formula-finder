@@ -32,13 +32,16 @@ def discover_pysindy(
     # Transform data to library features
     Theta = library.fit_transform(X_arr)
     
-    # Use STLSQ optimizer directly for sparsity (no SINDy class for static regression)
-    optimizer = STLSQ(threshold=0.1)  # Threshold for sparsity (tune lower for more terms)
-    optimizer.fit(Theta, y_arr)
+    # Reshape y to 2D for optimizer (n_samples, 1) to handle AxesArray properly
+    y_2d = y_arr.reshape(-1, 1)
     
-    # Predict
-    y_pred = Theta @ optimizer.coef_.flatten()
-    score = r2_score(y_arr, y_pred)
+    # Use STLSQ optimizer directly for sparsity
+    optimizer = STLSQ(threshold=0.1)  # Threshold for sparsity (tune lower for more terms)
+    optimizer.fit(Theta, y_2d)
+    
+    # Predict: Theta @ coef_ (coef_ is now (n_feat, 1))
+    y_pred = Theta @ optimizer.coef_
+    score = r2_score(y_arr, y_pred.ravel())
     
     # Get coefficients and build equation
     coeffs = optimizer.coef_.flatten()
