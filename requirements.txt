@@ -8,5 +8,3 @@ scikit-learn>=1.3.0
 scipy>=1.11.0
 pysr>=0.10.0  # Optional: requires Julia
 gplearn>=0.4.2  # Optional: for GPlearn method
-pysindy>=1.7.2  # Optional: for PySINDy method
-openpyxl>=3.1.0  # For Excel reading
