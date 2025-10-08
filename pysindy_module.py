@@ -7,8 +7,8 @@ Install with: pip install pysindy
 from typing import List, Dict, Any
 import sympy as sp
 from sklearn.metrics import r2_score
-from pysindy import SINDy
 from pysindy.feature_library import PolynomialLibrary
+from pysindy.optimizers import STLSQ
 import numpy as np
 import pandas as pd
 
@@ -29,30 +29,23 @@ def discover_pysindy(
         interaction_only=False
     )
     
-    # SINDy for regression: fit to y as "output"
-    model = SINDy(
-        feature_library=library,
-        optimizer="STLSQ",  # Sequentially Thresholded Least Squares for sparsity
-        threshold=0.1,  # Threshold for sparsity (tune lower for more terms)
-        n_jobs=1,
-        quiet=True
-    )
+    # Transform data to library features
+    Theta = library.fit_transform(X_arr)
     
-    # For static regression y = f(X), we fit library(X) ~ y
-    # PySINDy typically for dx/dt, but this approximates regression
-    library_features = library.fit_transform(X_arr)
-    model.optimizer_.fit(library_features, y_arr)  # Direct fit on library
+    # Use STLSQ optimizer directly for sparsity (no SINDy class for static regression)
+    optimizer = STLSQ(threshold=0.1)  # Threshold for sparsity (tune lower for more terms)
+    optimizer.fit(Theta, y_arr)
     
-    # Predict via library
-    y_pred = model.predict(X_arr)
-    score = r2_score(y_arr, y_pred.ravel() if y_pred.ndim > 1 else y_pred)
+    # Predict
+    y_pred = Theta @ optimizer.coef_.flatten()
+    score = r2_score(y_arr, y_pred)
     
     # Get coefficients and build equation
-    coeffs = model.coefficients()
+    coeffs = optimizer.coef_.flatten()
     feature_names_lib = library.get_feature_names(feature_names)
     
     terms = []
-    for coef, name in zip(coeffs.flatten(), feature_names_lib):
+    for coef, name in zip(coeffs, feature_names_lib):
         if abs(coef) > 1e-3:  # Threshold for inclusion
             term = sp.Float(coef) * sp.sympify(name.replace(" ", "*"))
             terms.append(term)
@@ -74,4 +67,5 @@ def discover_pysindy(
         "target_name": target_name,
         "is_linear": poly_degree == 1,
         "method": f"PySINDy (Sparse ID, Degree {poly_degree})"
+        # No model needed; uses SymPy subs for evaluation
     }
