@@ -294,6 +294,8 @@ def evaluate_formula(equation, X, feature_names, scaler=None, poly=None, model=N
         X_scaled = scaler.transform(X.values)
         X_poly = poly.transform(X_scaled)
         return model.predict(X_poly)
+    elif method == "gplearn" and model is not None:
+        return model.predict(X.values.astype(np.float64))
     else:
         y_pred = []
         for idx in range(len(X)):
