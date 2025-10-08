@@ -22,7 +22,7 @@ def discover_gplearn(
     X_arr = X.values.astype(np.float64)
     y_arr = y.values.astype(np.float64)
     
-    # GPlearn params tuned for brevity and accuracy
+    # GPlearn params tuned for brevity and accuracy (removed invalid params)
     model = SymbolicRegressor(
         population_size=5000,
         generations=n_iterations // 5,  # Fewer generations, larger pop for speed
@@ -35,40 +35,28 @@ def discover_gplearn(
         p_point_mutation=0.1,
         max_samples=0.9,
         verbose=0,
-        parsimony_coefficient_difference=lambda x: x * 0.01,  # Adaptive
-        random_state=42,
-        function_set_arguments={
-            'sqrt': {'arity': 1},
-            'log': {'arity': 1},
-            'sin': {'arity': 1},
-            'cos': {'arity': 1},
-            'exp': {'arity': 1},
-        }
+        random_state=42
     )
     model.fit(X_arr, y_arr)
     
     y_pred = model.predict(X_arr)
     score = r2_score(y_arr, y_pred)
     
-    # Extract best program as string
-    best_program = str(model._program[0])
-    # Convert GPlearn lisp-like to infix (simplified; assumes basic structure)
-    # For full multi-var, replace X0, X1, etc.
-    equation_str = best_program.replace('X0', feature_names[0] if len(feature_names) > 0 else 'x')
-    for i, name in enumerate(feature_names[1:], 1):
+    # Extract best program as string (Lisp format)
+    equation_str = str(model)
+    # Replace X0, X1, etc. with feature names
+    for i, name in enumerate(feature_names):
         equation_str = equation_str.replace(f'X{i}', name)
     
+    # Attempt to parse to SymPy (may fail for complex Lisp; fallback to 0)
     try:
         equation = sp.sympify(equation_str)
-    except:
-        # Fallback: use a simple linear if parsing fails
-        equation = sp.symbols('x')
-        equation_str = 'x'  # Placeholder
-        score = 0.0
+    except Exception:
+        equation = sp.Float(0)  # Placeholder; evaluation uses model.predict
     
-    complexity = len(str(equation).split())  # Rough estimate
+    complexity = len(equation_str.split())  # Rough estimate based on string
     
-    str_formula = str(sp.simplify(equation))
+    str_formula = equation_str  # Keep Lisp as plain text for now
     
     return {
         "equation": equation,
@@ -78,5 +66,6 @@ def discover_gplearn(
         "feature_names": feature_names,
         "target_name": target_name,
         "is_linear": False,
-        "method": "GPlearn (Genetic Programming)"
+        "method": "GPlearn (Genetic Programming)",
+        "model": model  # For numerical evaluation
     }
