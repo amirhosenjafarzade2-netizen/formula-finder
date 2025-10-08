@@ -2,6 +2,7 @@
 """
 Module for GPlearn integration in Formula Discovery App.
 Install with: pip install gplearn
+Note: Ensure scikit-learn >= 0.23 for compatibility. If '_validate_data' error persists, update sklearn.
 """
 
 from typing import List, Dict, Any
@@ -22,7 +23,7 @@ def discover_gplearn(
     X_arr = X.values.astype(np.float64)
     y_arr = y.values.astype(np.float64)
     
-    # GPlearn params tuned for brevity and accuracy (removed invalid params)
+    # GPlearn params tuned for brevity and accuracy
     model = SymbolicRegressor(
         population_size=5000,
         generations=n_iterations // 5,  # Fewer generations, larger pop for speed
