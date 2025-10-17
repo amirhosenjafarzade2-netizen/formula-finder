@@ -9,3 +9,4 @@ scipy>=1.11.0
 pysr>=0.10.0  # Optional: requires Julia
 gplearn>=0.4.2  # Optional: for GPlearn method
 juliacall
+openpyxl
