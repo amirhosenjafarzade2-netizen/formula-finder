@@ -18,40 +18,37 @@ from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 from scipy.optimize import curve_fit
 import traceback
-import tempfile
-
-# Fix Julia env (for Streamlit Cloud) - Use temp directory with proper permissions
-julia_tmp_dir = tempfile.mkdtemp(prefix='julia_depot_')
-os.environ['JULIA_DEPOT_PATH'] = julia_tmp_dir
-os.environ['JULIA_PKG_PRECOMPILE_AUTO'] = '0'
-os.environ['JULIA_PKG_SERVER'] = ''
 
 # === Backend detection ===
 pysr_available = False
 pysr_error = None
-try:
-    from pysr import PySRRegressor
-    pysr_available = True
-    st.sidebar.success("✅ PySR available")
-except Exception as e:
-    pysr_error = str(e)
-    st.sidebar.warning(f"⚠️ PySR not available: {pysr_error}")
 
 julia_available = False
 julia_error = None
-try:
-    from juliacall import Main as jl
-    # Set Julia project environment to temp directory
-    julia_project_dir = tempfile.mkdtemp(prefix='julia_project_')
-    jl.seval(f'import Pkg; Pkg.activate("{julia_project_dir}")')
-    jl.seval("Pkg.add(\"SymbolicRegression\")")
-    jl.seval("Pkg.add(\"SymbolicUtils\")")
-    
-    # Check if short_sr.jl exists in the current directory
-    if os.path.exists("short_sr.jl"):
-        jl.include("short_sr.jl")  # Load the Julia module
-    else:
-        # Define the Julia function inline if file doesn't exist
+
+# Try to initialize Julia environment only if explicitly enabled
+ENABLE_JULIA = os.environ.get('ENABLE_JULIA', 'false').lower() == 'true'
+
+if ENABLE_JULIA:
+    try:
+        import tempfile
+        # Create temporary directories with proper permissions
+        julia_tmp_dir = tempfile.mkdtemp(prefix='julia_depot_')
+        julia_project_dir = tempfile.mkdtemp(prefix='julia_project_')
+        
+        # Set Julia environment variables
+        os.environ['JULIA_DEPOT_PATH'] = julia_tmp_dir
+        os.environ['JULIA_PROJECT'] = julia_project_dir
+        os.environ['JULIA_PKG_PRECOMPILE_AUTO'] = '0'
+        
+        from juliacall import Main as jl
+        
+        # Initialize Julia environment
+        jl.seval(f'import Pkg; Pkg.activate("{julia_project_dir}")')
+        jl.seval("Pkg.add(\"SymbolicRegression\")")
+        jl.seval("Pkg.add(\"SymbolicUtils\")")
+        
+        # Define Julia function inline
         jl.seval("""
         using SymbolicRegression
         using SymbolicUtils
@@ -87,12 +84,23 @@ try:
             return equation_str, score, complexity
         end
         """)
-    
-    julia_available = True
-    st.sidebar.success("✅ Julia available")
+        
+        julia_available = True
+        st.sidebar.success("✅ Julia available")
+    except Exception as e:
+        julia_error = str(e)
+        st.sidebar.warning(f"⚠️ Julia not available: {julia_error[:100]}...")
+else:
+    st.sidebar.info("ℹ️ Julia disabled (set ENABLE_JULIA=true to enable)")
+
+# Try PySR separately (doesn't require Julia setup issues)
+try:
+    from pysr import PySRRegressor
+    pysr_available = True
+    st.sidebar.success("✅ PySR available")
 except Exception as e:
-    julia_error = str(e)
-    st.sidebar.warning(f"⚠️ Julia not available: {julia_error}")
+    pysr_error = str(e)
+    st.sidebar.warning(f"⚠️ PySR not available: {pysr_error[:100]}...")
 
 linear_available = True  # Always available
 poly_available = True    # PolynomialFeatures is always available with sklearn
