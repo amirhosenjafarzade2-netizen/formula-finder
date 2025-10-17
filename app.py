@@ -26,27 +26,37 @@ pysr_error = None
 julia_available = False
 julia_error = None
 
-# Try to initialize Julia environment only if explicitly enabled
+# Check if Julia should be enabled
 ENABLE_JULIA = os.environ.get('ENABLE_JULIA', 'false').lower() == 'true'
 
 if ENABLE_JULIA:
     try:
         import tempfile
-        # Create temporary directories with proper permissions
-        julia_tmp_dir = tempfile.mkdtemp(prefix='julia_depot_')
-        julia_project_dir = tempfile.mkdtemp(prefix='julia_project_')
+        import sys
         
-        # Set Julia environment variables
-        os.environ['JULIA_DEPOT_PATH'] = julia_tmp_dir
-        os.environ['JULIA_PROJECT'] = julia_project_dir
+        # Create user-writable temporary directories
+        julia_depot = tempfile.mkdtemp(prefix='jl_depot_')
+        julia_project = tempfile.mkdtemp(prefix='jl_proj_')
+        
+        # Clear any existing Julia environment variables that might cause conflicts
+        for key in list(os.environ.keys()):
+            if key.startswith('JULIA_'):
+                del os.environ[key]
+        
+        # Set fresh Julia environment variables pointing to writable locations
+        os.environ['JULIA_DEPOT_PATH'] = julia_depot
+        os.environ['JULIA_PROJECT'] = julia_project
+        os.environ['JULIA_LOAD_PATH'] = f'@:{julia_project}'
         os.environ['JULIA_PKG_PRECOMPILE_AUTO'] = '0'
+        os.environ['PYTHON'] = sys.executable
         
+        # Now try to import and initialize Julia
         from juliacall import Main as jl
         
-        # Initialize Julia environment
-        jl.seval(f'import Pkg; Pkg.activate("{julia_project_dir}")')
-        jl.seval("Pkg.add(\"SymbolicRegression\")")
-        jl.seval("Pkg.add(\"SymbolicUtils\")")
+        # Initialize Julia with safe settings
+        jl.seval(f'import Pkg; Pkg.activate("{julia_project}"; io=devnull)')
+        jl.seval('Pkg.add("SymbolicRegression"; io=devnull)')
+        jl.seval('Pkg.add("SymbolicUtils"; io=devnull)')
         
         # Define Julia function inline
         jl.seval("""
@@ -93,7 +103,7 @@ if ENABLE_JULIA:
 else:
     st.sidebar.info("ℹ️ Julia disabled (set ENABLE_JULIA=true to enable)")
 
-# Try PySR separately (doesn't require Julia setup issues)
+# Try PySR separately (may work independently of Julia setup)
 try:
     from pysr import PySRRegressor
     pysr_available = True
