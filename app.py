@@ -38,6 +38,12 @@ if ENABLE_JULIA:
         julia_depot = tempfile.mkdtemp(prefix='jl_depot_')
         julia_project = tempfile.mkdtemp(prefix='jl_proj_')
         
+        # Test write permissions
+        test_file = os.path.join(julia_depot, 'test.txt')
+        with open(test_file, 'w') as f:
+            f.write('test')
+        os.remove(test_file)
+        
         # Clear any existing Julia environment variables that might cause conflicts
         for key in list(os.environ.keys()):
             if key.startswith('JULIA_'):
@@ -50,7 +56,8 @@ if ENABLE_JULIA:
         os.environ['JULIA_PKG_PRECOMPILE_AUTO'] = '0'
         os.environ['PYTHON'] = sys.executable
         
-        # Now try to import and initialize Julia
+        # Only NOW try to import juliacall (this is when it initializes)
+        import juliacall
         from juliacall import Main as jl
         
         # Initialize Julia with safe settings
@@ -97,20 +104,27 @@ if ENABLE_JULIA:
         
         julia_available = True
         st.sidebar.success("✅ Julia available")
+    except PermissionError as e:
+        julia_error = f"Permission denied: {str(e)}"
+        st.sidebar.error(f"❌ Julia disabled: {julia_error[:100]}... \n\nStreamlit Cloud doesn't allow Julia initialization. Please use Polynomial, Curve Fitting, or Linear methods instead.")
     except Exception as e:
         julia_error = str(e)
         st.sidebar.warning(f"⚠️ Julia not available: {julia_error[:100]}...")
 else:
     st.sidebar.info("ℹ️ Julia disabled (set ENABLE_JULIA=true to enable)")
 
-# Try PySR separately (may work independently of Julia setup)
-try:
-    from pysr import PySRRegressor
-    pysr_available = True
-    st.sidebar.success("✅ PySR available")
-except Exception as e:
-    pysr_error = str(e)
-    st.sidebar.warning(f"⚠️ PySR not available: {pysr_error[:100]}...")
+# Try PySR separately - but DON'T if Julia failed with permissions
+if ENABLE_JULIA and not julia_available and "Permission denied" in str(julia_error):
+    st.sidebar.info("ℹ️ PySR skipped (requires Julia)")
+else:
+    try:
+        from pysr import PySRRegressor
+        pysr_available = True
+        st.sidebar.success("✅ PySR available")
+    except Exception as e:
+        pysr_error = str(e)
+        if ENABLE_JULIA:
+            st.sidebar.warning(f"⚠️ PySR not available: {pysr_error[:100]}...")
 
 linear_available = True  # Always available
 poly_available = True    # PolynomialFeatures is always available with sklearn
