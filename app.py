@@ -1,7 +1,7 @@
 """
 Standalone Streamlit App for Formula Discovery.
-Supports PySR (if Julia available), Julia Short Formulas (if Julia available), PolynomialFeatures, Nonlinear Curve Fitting (scipy), and Linear Regression.
-Run with: streamlit run app.py
+Supports PySR (if Julia available), PolynomialFeatures, Nonlinear Curve Fitting (scipy), and Linear Regression.
+Run with: streamlit run formula_app.py
 """
 
 import streamlit as st
@@ -17,90 +17,19 @@ from sklearn.metrics import r2_score
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 from scipy.optimize import curve_fit
-import traceback
+import uuid
+
+# Fix Julia env (for Streamlit Cloud)
+os.environ['JULIA_DEPOT_PATH'] = '/tmp/julia'
+os.environ['JULIA_LOAD_PATH'] = '/tmp/julia'
 
 # === Backend detection ===
 pysr_available = False
-pysr_error = None
-
-julia_available = False
-julia_error = None
-
-# Try to initialize Julia environment only if explicitly enabled
-ENABLE_JULIA = os.environ.get('ENABLE_JULIA', 'false').lower() == 'true'
-
-if ENABLE_JULIA:
-    try:
-        import tempfile
-        # Create temporary directories with proper permissions
-        julia_tmp_dir = tempfile.mkdtemp(prefix='julia_depot_')
-        julia_project_dir = tempfile.mkdtemp(prefix='julia_project_')
-        
-        # Set Julia environment variables
-        os.environ['JULIA_DEPOT_PATH'] = julia_tmp_dir
-        os.environ['JULIA_PROJECT'] = julia_project_dir
-        os.environ['JULIA_PKG_PRECOMPILE_AUTO'] = '0'
-        
-        from juliacall import Main as jl
-        
-        # Initialize Julia environment
-        jl.seval(f'import Pkg; Pkg.activate("{julia_project_dir}")')
-        jl.seval("Pkg.add(\"SymbolicRegression\")")
-        jl.seval("Pkg.add(\"SymbolicUtils\")")
-        
-        # Define Julia function inline
-        jl.seval("""
-        using SymbolicRegression
-        using SymbolicUtils
-        
-        function discover_short_formula(X::Matrix{Float64}, y::Vector{Float64}, feature_names::Vector{String}, max_complexity::Int=10, n_iterations::Int=40)
-            options = Options(
-                binary_operators=[+, *, /, -],
-                unary_operators=[cos, exp, sin, log, sqrt],
-                populations=20,
-                maxsize=max_complexity,
-                model_selection=:score
-            )
-            
-            hall_of_fame = equation_search(
-                X, y,
-                niterations=n_iterations,
-                options=options,
-                parallelism=:multithreading
-            )
-            
-            dominating = calculate_pareto_frontier(hall_of_fame)
-            best_member = dominating[end]
-            
-            tree = best_member.tree
-            equation_str = string(SymbolicUtils.simplify(tree))
-            for (i, name) in enumerate(feature_names)
-                equation_str = replace(equation_str, "x$(i)" => name)
-            end
-            
-            score = best_member.score
-            complexity = best_member.complexity
-            
-            return equation_str, score, complexity
-        end
-        """)
-        
-        julia_available = True
-        st.sidebar.success("✅ Julia available")
-    except Exception as e:
-        julia_error = str(e)
-        st.sidebar.warning(f"⚠️ Julia not available: {julia_error[:100]}...")
-else:
-    st.sidebar.info("ℹ️ Julia disabled (set ENABLE_JULIA=true to enable)")
-
-# Try PySR separately (doesn't require Julia setup issues)
 try:
     from pysr import PySRRegressor
     pysr_available = True
-    st.sidebar.success("✅ PySR available")
-except Exception as e:
-    pysr_error = str(e)
-    st.sidebar.warning(f"⚠️ PySR not available: {pysr_error[:100]}...")
+except Exception:
+    pass
 
 linear_available = True  # Always available
 poly_available = True    # PolynomialFeatures is always available with sklearn
@@ -133,26 +62,21 @@ def discover_formula(
         try:
             model = PySRRegressor(
                 niterations=n_iterations,
-                binary_operators=["+", "-", "*", "/"],
+                binary_operators=["add", "sub", "mul", "div"],
                 unary_operators=["exp", "log", "sin", "cos", "sqrt"],
                 maxsize=max_complexity,
+                loss="(x, y) -> (x - y)^2",
                 model_selection="best",
                 verbosity=0,
-                progress=False,
-                temp_equation_file=False
+                progress=False
             )
             model.fit(X_arr, y_arr, variable_names=feature_names)
 
             y_pred = model.predict(X_arr)
             score = r2_score(y_arr, y_pred)
 
-            # Get equation using sympy()
-            try:
-                equation = model.sympy()
-            except:
-                # Fallback if sympy() fails
-                equation = model.get_best().equation
-            
+            equation_str = str(model.sympy())
+            equation = sp.sympify(equation_str)
             complexity = len(list(sp.preorder_traversal(equation)))
 
             str_formula = str(sp.simplify(equation))
@@ -170,29 +94,7 @@ def discover_formula(
                 "method": "PySR (Evolutionary)"
             }
         except Exception as e:
-            raise FormulaDiscoveryError(f"PySR failed: {e}\n{traceback.format_exc()}")
-
-    # === Julia Short Formulas (SymbolicRegression.jl) ===
-    if method == "julia_short" and julia_available:
-        try:
-            from juliacall import Main as jl
-            X_mat = jl.Matrix(X_arr)
-            y_vec = jl.Vector(y_arr)
-            fnames = jl.Vector(feature_names)
-            equation_str, score, complexity = jl.discover_short_formula(X_mat, y_vec, fnames, max_complexity, n_iterations)
-            equation = sp.sympify(equation_str)
-            return {
-                "equation": equation,
-                "str_formula": str(sp.simplify(equation)),
-                "score": float(score),
-                "complexity": int(complexity),
-                "feature_names": feature_names,
-                "target_name": target_name,
-                "is_linear": False,
-                "method": "Julia Short Formulas"
-            }
-        except Exception as e:
-            raise FormulaDiscoveryError(f"Julia Short failed: {e}\n{traceback.format_exc()}")
+            raise FormulaDiscoveryError(f"PySR failed: {e}")
 
     # === Polynomial Regression (PolynomialFeatures + LinearRegression) ===
     if method == "poly" and poly_available:
@@ -246,7 +148,7 @@ def discover_formula(
                     def custom_func(X, *p):
                         subs_dict = {sp.Symbol(feature_names[i]): X[:, i] for i in range(X.shape[1])}
                         subs_dict.update({sp.Symbol(param): p[i] for i, param in enumerate(params)})
-                        return np.array([float(expr.subs(subs_dict).evalf()) for _ in range(len(X))])
+                        return float(expr.subs(subs_dict).evalf())
                     model_func = custom_func
                     n_params = len(params)
                 except Exception as e:
@@ -393,7 +295,7 @@ custom_model = st.sidebar.text_input(
     help="Enter a custom model, e.g., 'a * x1 + b * sin(x2) + c'. Leave blank for predefined models."
 )
 
-uploaded_files = st.file_uploader("📂 Upload Excel files", accept_multiple_files=True, type=['xlsx', 'xls'], help="Upload one or more Excel files with numeric data.")
+uploaded_files = st.file_uploader("📁 Upload Excel files", accept_multiple_files=True, type=['xlsx', 'xls'], help="Upload one or more Excel files with numeric data.")
 n_rows_input = st.number_input("Sample rows (0 for all)", min_value=0, value=0, help="Number of rows to sample (0 to use all)")
 n_rows = None if n_rows_input == 0 else n_rows_input
 
@@ -426,17 +328,11 @@ if not formula_features or formula_target not in params or formula_target in for
 available_methods = []
 if pysr_available:
     available_methods.append("pysr")
-if julia_available:
-    available_methods.append("julia_short")
 available_methods.extend(["poly", "curve_fit", "linear"])
-
-# Show what's available
-st.info(f"Available methods: {', '.join(available_methods)}")
 
 # Method choice
 method_options = {
     "pysr": "PySR (Evolutionary Symbolic Regression): Finds complex formulas using genetic algorithms",
-    "julia_short": "Julia Short Formulas: Finds concise, accurate formulas with complexity penalties",
     "poly": f"Polynomial Regression (Degree {poly_degree}): Fits a polynomial of specified degree",
     "curve_fit": f"Nonlinear Curve Fitting ({nonlinear_model}): Fits a specific nonlinear model",
     "linear": "Linear Regression: Fits a simple linear model"
@@ -446,7 +342,7 @@ selected_method_key = st.radio(
     options=available_methods,
     format_func=lambda key: method_options[key],
     index=0,
-    help="Choose a method based on your data. PySR and Julia Short are best for complex relationships, Polynomial for smooth curves, Curve Fitting for specific models, Linear for simple relationships."
+    help="Choose a method based on your data. PySR is best for complex relationships, Polynomial for smooth curves, Curve Fitting for specific models, Linear for simple relationships."
 )
 
 run_formula = st.button("🚀 Discover Formula", type="primary")
@@ -501,7 +397,7 @@ if run_formula:
         latex_formula = sp.latex(formula_result['equation'])
         st.latex(latex_formula)
 
-        with st.expander("📤 Plain Text Version"):
+        with st.expander("🔤 Plain Text Version"):
             st.code(formula_result['str_formula'], language='text')
 
         with st.expander("ℹ️ Details"):
@@ -619,7 +515,6 @@ Plain Text:
         st.error(f"❌ Discovery Error: {str(e)}")
     except Exception as e:
         st.error(f"💥 Unexpected Error: {str(e)}")
-        st.error(f"Traceback: {traceback.format_exc()}")
     finally:
         progress_bar.empty()
         status_text.empty()
@@ -634,7 +529,7 @@ if 'formula_result' in st.session_state:
         with validation_placeholder.container():
             st.markdown("### Validate Formula")
             validation_files = st.file_uploader(
-                "📂 Upload Excel file for Validation",
+                "📁 Upload Excel file for Validation",
                 accept_multiple_files=True,
                 type=['xlsx', 'xls'],
                 key='validation_uploader',
