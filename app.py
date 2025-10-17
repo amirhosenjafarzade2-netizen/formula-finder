@@ -20,8 +20,11 @@ from scipy.optimize import curve_fit
 import traceback
 
 # Fix Julia env (for Streamlit Cloud)
-os.environ['JULIA_DEPOT_PATH'] = '/tmp/julia'
-os.environ['JULIA_LOAD_PATH'] = '/tmp/julia'
+import tempfile
+julia_tmp_dir = tempfile.mkdtemp(prefix='julia_')
+os.environ['JULIA_DEPOT_PATH'] = julia_tmp_dir
+os.environ['JULIA_LOAD_PATH'] = julia_tmp_dir
+os.environ['JULIA_PKG_PRESERVE_TIERED_INSTALLED'] = 'false'
 
 # === Backend detection ===
 pysr_available = False
