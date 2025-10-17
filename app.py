@@ -1,6 +1,6 @@
 """
 Standalone Streamlit App for Formula Discovery.
-Supports PySR (if Julia available), PolynomialFeatures, Nonlinear Curve Fitting (scipy), and Linear Regression.
+Supports PySR (if Julia available), Julia Short Formulas (if Julia available), PolynomialFeatures, Nonlinear Curve Fitting (scipy), and Linear Regression.
 Run with: streamlit run formula_app.py
 """
 
@@ -28,6 +28,16 @@ pysr_available = False
 try:
     from pysr import PySRRegressor
     pysr_available = True
+except Exception:
+    pass
+
+julia_available = False
+try:
+    from juliacall import Main as jl
+    jl.seval("using Pkg; Pkg.add(\"SymbolicRegression\")")
+    jl.seval("using Pkg; Pkg.add(\"SymbolicUtils\")")
+    jl.include("short_sr.jl")  # Load the new Julia module
+    julia_available = True
 except Exception:
     pass
 
@@ -95,6 +105,27 @@ def discover_formula(
             }
         except Exception as e:
             raise FormulaDiscoveryError(f"PySR failed: {e}")
+
+    # === Julia Short Formulas (SymbolicRegression.jl) ===
+    if method == "julia_short" and julia_available:
+        try:
+            X_mat = jl.Matrix(X_arr)
+            y_vec = jl.Vector(y_arr)
+            fnames = jl.Vector(feature_names)
+            equation_str, score, complexity = jl.discover_short_formula(X_mat, y_vec, fnames, max_complexity, n_iterations)
+            equation = sp.sympify(equation_str)
+            return {
+                "equation": equation,
+                "str_formula": str(sp.simplify(equation)),
+                "score": float(score),
+                "complexity": int(complexity),
+                "feature_names": feature_names,
+                "target_name": target_name,
+                "is_linear": False,
+                "method": "Julia Short Formulas"
+            }
+        except Exception as e:
+            raise FormulaDiscoveryError(f"Julia Short failed: {e}")
 
     # === Polynomial Regression (PolynomialFeatures + LinearRegression) ===
     if method == "poly" and poly_available:
@@ -169,7 +200,9 @@ def discover_formula(
                 equation = equation.subs(subs_dict)
             else:
                 x0 = sp.Symbol(feature_names[0])
-                if nonlinear_model == "exponential":
+                if nonlinear_model == "exponential_minus":
+                    equation = popt[0] * sp.exp(-popt[1] * x0) + popt[2]
+                elif nonlinear_model == "exponential":
                     equation = popt[0] * sp.exp(popt[1] * x0) + popt[2]
                 elif nonlinear_model == "sinusoidal":
                     equation = popt[0] * sp.sin(popt[1] * x0) + popt[2]
@@ -328,11 +361,14 @@ if not formula_features or formula_target not in params or formula_target in for
 available_methods = []
 if pysr_available:
     available_methods.append("pysr")
+if julia_available:
+    available_methods.append("julia_short")
 available_methods.extend(["poly", "curve_fit", "linear"])
 
 # Method choice
 method_options = {
     "pysr": "PySR (Evolutionary Symbolic Regression): Finds complex formulas using genetic algorithms",
+    "julia_short": "Julia Short Formulas: Finds concise, accurate formulas with complexity penalties",
     "poly": f"Polynomial Regression (Degree {poly_degree}): Fits a polynomial of specified degree",
     "curve_fit": f"Nonlinear Curve Fitting ({nonlinear_model}): Fits a specific nonlinear model",
     "linear": "Linear Regression: Fits a simple linear model"
@@ -342,7 +378,7 @@ selected_method_key = st.radio(
     options=available_methods,
     format_func=lambda key: method_options[key],
     index=0,
-    help="Choose a method based on your data. PySR is best for complex relationships, Polynomial for smooth curves, Curve Fitting for specific models, Linear for simple relationships."
+    help="Choose a method based on your data. PySR and Julia Short are best for complex relationships, Polynomial for smooth curves, Curve Fitting for specific models, Linear for simple relationships."
 )
 
 run_formula = st.button("🚀 Discover Formula", type="primary")
