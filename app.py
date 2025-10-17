@@ -27,23 +27,39 @@ os.environ['JULIA_LOAD_PATH'] = '/tmp/julia'
 pysr_available = False
 try:
     from pysr import PySRRegressor
+    # Set JULIA environment variable to PySR's Julia runtime
+    os.environ["JULIA"] = pysr.julia.jl_path
     pysr_available = True
-except Exception:
+except Exception as e:
+    st.error(f"PySR setup failed: {str(e)}")
     pass
 
 julia_available = False
 try:
+    with open("/tmp/julia_setup.log", "w") as f:
+        f.write("Starting Julia setup\n")
     from juliacall import Main as jl
+    with open("/tmp/julia_setup.log", "a") as f:
+        f.write("Imported juliacall\n")
     jl.seval("using Pkg; Pkg.add(\"SymbolicRegression\")")
+    with open("/tmp/julia_setup.log", "a") as f:
+        f.write("Added SymbolicRegression\n")
     jl.seval("using Pkg; Pkg.add(\"SymbolicUtils\")")
-    jl.include("short_sr.jl")  # Load the new Julia module
+    with open("/tmp/julia_setup.log", "a") as f:
+        f.write("Added SymbolicUtils\n")
+    jl.include("short_sr.jl")
+    with open("/tmp/julia_setup.log", "a") as f:
+        f.write("Included short_sr.jl\n")
     julia_available = True
-except Exception:
+except Exception as e:
+    with open("/tmp/julia_setup.log", "a") as f:
+        f.write(f"Julia setup failed: {str(e)}\n")
+    st.error(f"Julia setup failed: {str(e)}")
     pass
 
-linear_available = True  # Always available
-poly_available = True    # PolynomialFeatures is always available with sklearn
-curve_fit_available = True  # scipy.optimize.curve_fit is always available
+linear_available = True
+poly_available = True
+curve_fit_available = True
 
 class FormulaDiscoveryError(Exception):
     pass
@@ -104,7 +120,7 @@ def discover_formula(
                 "method": "PySR (Evolutionary)"
             }
         except Exception as e:
-            raise FormulaDiscoveryError(f"PySR failed: {e}")
+            raise FormulaDiscoveryError(f"PySR failed: {str(e)}")
 
     # === Julia Short Formulas (SymbolicRegression.jl) ===
     if method == "julia_short" and julia_available:
@@ -125,7 +141,7 @@ def discover_formula(
                 "method": "Julia Short Formulas"
             }
         except Exception as e:
-            raise FormulaDiscoveryError(f"Julia Short failed: {e}")
+            raise FormulaDiscoveryError(f"Julia Short failed: {str(e)}")
 
     # === Polynomial Regression (PolynomialFeatures + LinearRegression) ===
     if method == "poly" and poly_available:
@@ -160,7 +176,7 @@ def discover_formula(
                 "model": model
             }
         except Exception as e:
-            raise FormulaDiscoveryError(f"Polynomial Regression failed: {e}")
+            raise FormulaDiscoveryError(f"Polynomial Regression failed: {str(e)}")
 
     # === Nonlinear Curve Fitting (scipy.optimize.curve_fit) ===
     if method == "curve_fit" and curve_fit_available:
@@ -200,9 +216,7 @@ def discover_formula(
                 equation = equation.subs(subs_dict)
             else:
                 x0 = sp.Symbol(feature_names[0])
-                if nonlinear_model == "exponential_minus":
-                    equation = popt[0] * sp.exp(-popt[1] * x0) + popt[2]
-                elif nonlinear_model == "exponential":
+                if nonlinear_model == "exponential":
                     equation = popt[0] * sp.exp(popt[1] * x0) + popt[2]
                 elif nonlinear_model == "sinusoidal":
                     equation = popt[0] * sp.sin(popt[1] * x0) + popt[2]
@@ -271,14 +285,18 @@ def load_and_preprocess_data(uploaded_files, n_rows=None):
     dfs = []
     for uploaded_file in uploaded_files:
         uploaded_file.seek(0)
-        df_temp = pd.read_excel(io.BytesIO(uploaded_file.read()), engine='openpyxl')
-        numeric_cols = df_temp.select_dtypes(include=[np.number]).columns.tolist()
-        if numeric_cols:
-            df_temp = df_temp[numeric_cols].fillna(df_temp[numeric_cols].median())
-            if n_rows:
-                df_temp = df_temp.sample(n=min(n_rows, len(df_temp)), random_state=42)
-            dfs.append(df_temp)
-
+        try:
+            df_temp = pd.read_excel(io.BytesIO(uploaded_file.read()), engine='openpyxl')
+            numeric_cols = df_temp.select_dtypes(include=[np.number]).columns.tolist()
+            if numeric_cols:
+                df_temp = df_temp[numeric_cols].fillna(df_temp[numeric_cols].median())
+                if n_rows:
+                    df_temp = df_temp.sample(n=min(n_rows, len(df_temp)), random_state=42)
+                dfs.append(df_temp)
+            else:
+                st.warning(f"No numeric columns found in {uploaded_file.name}")
+        except Exception as e:
+            st.error(f"Failed to read {uploaded_file.name}: {str(e)}")
     if dfs:
         return pd.concat(dfs, ignore_index=True)
     return pd.DataFrame()
@@ -339,6 +357,8 @@ if st.button("Load Data"):
         st.success(f"✅ Loaded {len(df)} rows with {len(df.columns)} numeric columns")
         with st.expander("👁️ Data Preview"):
             st.dataframe(df.head(10), use_container_width=True)
+    else:
+        st.error("❌ No valid data loaded. Please upload an Excel file with numeric columns.")
 
 if 'df' not in st.session_state:
     st.warning("⚠️ Load data first.")
@@ -346,6 +366,7 @@ if 'df' not in st.session_state:
 
 df = st.session_state.df
 params = df.select_dtypes(include=[np.number]).columns.tolist()
+st.write(f"Debug: Available columns: {params}")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -353,6 +374,7 @@ with col1:
 with col2:
     formula_target = st.selectbox("🎯 Target Variable", options=params, help="Select the variable to predict")
 
+st.write(f"Debug: Selected features: {formula_features}, Target: {formula_target}")
 if not formula_features or formula_target not in params or formula_target in formula_features:
     st.error("❌ Select valid features (excluding target).")
     st.stop()
@@ -364,6 +386,8 @@ if pysr_available:
 if julia_available:
     available_methods.append("julia_short")
 available_methods.extend(["poly", "curve_fit", "linear"])
+st.write(f"Debug: PySR available: {pysr_available}, Julia available: {julia_available}")
+st.write(f"Debug: Available methods: {available_methods}")
 
 # Method choice
 method_options = {
