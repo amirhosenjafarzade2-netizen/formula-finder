@@ -1,7 +1,7 @@
 """
 Standalone Streamlit App for Formula Discovery.
 Supports PySR (if Julia available), Julia Short Formulas (if Julia available), PolynomialFeatures, Nonlinear Curve Fitting (scipy), and Linear Regression.
-Run with: streamlit run formula_app.py
+Run with: streamlit run app.py
 """
 
 import streamlit as st
@@ -17,7 +17,7 @@ from sklearn.metrics import r2_score
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 from scipy.optimize import curve_fit
-import uuid
+import traceback
 
 # Fix Julia env (for Streamlit Cloud)
 os.environ['JULIA_DEPOT_PATH'] = '/tmp/julia'
@@ -25,21 +25,28 @@ os.environ['JULIA_LOAD_PATH'] = '/tmp/julia'
 
 # === Backend detection ===
 pysr_available = False
+pysr_error = None
 try:
     from pysr import PySRRegressor
     pysr_available = True
-except Exception:
-    pass
+    st.sidebar.success("✅ PySR available")
+except Exception as e:
+    pysr_error = str(e)
+    st.sidebar.warning(f"⚠️ PySR not available: {pysr_error}")
 
 julia_available = False
+julia_error = None
 try:
     from juliacall import Main as jl
-    jl.seval("using Pkg; Pkg.add(\"SymbolicRegression\")")
-    jl.seval("using Pkg; Pkg.add(\"SymbolicUtils\")")
+    jl.seval("using Pkg")
+    jl.seval("Pkg.add(\"SymbolicRegression\")")
+    jl.seval("Pkg.add(\"SymbolicUtils\")")
     jl.include("short_sr.jl")  # Load the new Julia module
     julia_available = True
-except Exception:
-    pass
+    st.sidebar.success("✅ Julia available")
+except Exception as e:
+    julia_error = str(e)
+    st.sidebar.warning(f"⚠️ Julia not available: {julia_error}")
 
 linear_available = True  # Always available
 poly_available = True    # PolynomialFeatures is always available with sklearn
@@ -72,21 +79,26 @@ def discover_formula(
         try:
             model = PySRRegressor(
                 niterations=n_iterations,
-                binary_operators=["add", "sub", "mul", "div"],
+                binary_operators=["+", "-", "*", "/"],
                 unary_operators=["exp", "log", "sin", "cos", "sqrt"],
                 maxsize=max_complexity,
-                loss="(x, y) -> (x - y)^2",
                 model_selection="best",
                 verbosity=0,
-                progress=False
+                progress=False,
+                temp_equation_file=False
             )
             model.fit(X_arr, y_arr, variable_names=feature_names)
 
             y_pred = model.predict(X_arr)
             score = r2_score(y_arr, y_pred)
 
-            equation_str = str(model.sympy())
-            equation = sp.sympify(equation_str)
+            # Get equation using sympy()
+            try:
+                equation = model.sympy()
+            except:
+                # Fallback if sympy() fails
+                equation = model.get_best().equation
+            
             complexity = len(list(sp.preorder_traversal(equation)))
 
             str_formula = str(sp.simplify(equation))
@@ -104,7 +116,7 @@ def discover_formula(
                 "method": "PySR (Evolutionary)"
             }
         except Exception as e:
-            raise FormulaDiscoveryError(f"PySR failed: {e}")
+            raise FormulaDiscoveryError(f"PySR failed: {e}\n{traceback.format_exc()}")
 
     # === Julia Short Formulas (SymbolicRegression.jl) ===
     if method == "julia_short" and julia_available:
@@ -125,7 +137,7 @@ def discover_formula(
                 "method": "Julia Short Formulas"
             }
         except Exception as e:
-            raise FormulaDiscoveryError(f"Julia Short failed: {e}")
+            raise FormulaDiscoveryError(f"Julia Short failed: {e}\n{traceback.format_exc()}")
 
     # === Polynomial Regression (PolynomialFeatures + LinearRegression) ===
     if method == "poly" and poly_available:
@@ -179,7 +191,7 @@ def discover_formula(
                     def custom_func(X, *p):
                         subs_dict = {sp.Symbol(feature_names[i]): X[:, i] for i in range(X.shape[1])}
                         subs_dict.update({sp.Symbol(param): p[i] for i, param in enumerate(params)})
-                        return float(expr.subs(subs_dict).evalf())
+                        return np.array([float(expr.subs(subs_dict).evalf()) for _ in range(len(X))])
                     model_func = custom_func
                     n_params = len(params)
                 except Exception as e:
@@ -200,9 +212,7 @@ def discover_formula(
                 equation = equation.subs(subs_dict)
             else:
                 x0 = sp.Symbol(feature_names[0])
-                if nonlinear_model == "exponential_minus":
-                    equation = popt[0] * sp.exp(-popt[1] * x0) + popt[2]
-                elif nonlinear_model == "exponential":
+                if nonlinear_model == "exponential":
                     equation = popt[0] * sp.exp(popt[1] * x0) + popt[2]
                 elif nonlinear_model == "sinusoidal":
                     equation = popt[0] * sp.sin(popt[1] * x0) + popt[2]
@@ -365,6 +375,9 @@ if julia_available:
     available_methods.append("julia_short")
 available_methods.extend(["poly", "curve_fit", "linear"])
 
+# Show what's available
+st.info(f"Available methods: {', '.join(available_methods)}")
+
 # Method choice
 method_options = {
     "pysr": "PySR (Evolutionary Symbolic Regression): Finds complex formulas using genetic algorithms",
@@ -433,7 +446,7 @@ if run_formula:
         latex_formula = sp.latex(formula_result['equation'])
         st.latex(latex_formula)
 
-        with st.expander("🔤 Plain Text Version"):
+        with st.expander("📤 Plain Text Version"):
             st.code(formula_result['str_formula'], language='text')
 
         with st.expander("ℹ️ Details"):
@@ -551,6 +564,7 @@ Plain Text:
         st.error(f"❌ Discovery Error: {str(e)}")
     except Exception as e:
         st.error(f"💥 Unexpected Error: {str(e)}")
+        st.error(f"Traceback: {traceback.format_exc()}")
     finally:
         progress_bar.empty()
         status_text.empty()
