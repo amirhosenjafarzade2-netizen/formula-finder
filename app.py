@@ -18,13 +18,13 @@ from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 from scipy.optimize import curve_fit
 import traceback
-
-# Fix Julia env (for Streamlit Cloud)
 import tempfile
-julia_tmp_dir = tempfile.mkdtemp(prefix='julia_')
+
+# Fix Julia env (for Streamlit Cloud) - Use temp directory with proper permissions
+julia_tmp_dir = tempfile.mkdtemp(prefix='julia_depot_')
 os.environ['JULIA_DEPOT_PATH'] = julia_tmp_dir
-os.environ['JULIA_LOAD_PATH'] = julia_tmp_dir
-os.environ['JULIA_PKG_PRESERVE_TIERED_INSTALLED'] = 'false'
+os.environ['JULIA_PKG_PRECOMPILE_AUTO'] = '0'
+os.environ['JULIA_PKG_SERVER'] = ''
 
 # === Backend detection ===
 pysr_available = False
@@ -41,10 +41,53 @@ julia_available = False
 julia_error = None
 try:
     from juliacall import Main as jl
-    jl.seval("using Pkg")
+    # Set Julia project environment to temp directory
+    julia_project_dir = tempfile.mkdtemp(prefix='julia_project_')
+    jl.seval(f'import Pkg; Pkg.activate("{julia_project_dir}")')
     jl.seval("Pkg.add(\"SymbolicRegression\")")
     jl.seval("Pkg.add(\"SymbolicUtils\")")
-    jl.include("short_sr.jl")  # Load the new Julia module
+    
+    # Check if short_sr.jl exists in the current directory
+    if os.path.exists("short_sr.jl"):
+        jl.include("short_sr.jl")  # Load the Julia module
+    else:
+        # Define the Julia function inline if file doesn't exist
+        jl.seval("""
+        using SymbolicRegression
+        using SymbolicUtils
+        
+        function discover_short_formula(X::Matrix{Float64}, y::Vector{Float64}, feature_names::Vector{String}, max_complexity::Int=10, n_iterations::Int=40)
+            options = Options(
+                binary_operators=[+, *, /, -],
+                unary_operators=[cos, exp, sin, log, sqrt],
+                populations=20,
+                maxsize=max_complexity,
+                model_selection=:score
+            )
+            
+            hall_of_fame = equation_search(
+                X, y,
+                niterations=n_iterations,
+                options=options,
+                parallelism=:multithreading
+            )
+            
+            dominating = calculate_pareto_frontier(hall_of_fame)
+            best_member = dominating[end]
+            
+            tree = best_member.tree
+            equation_str = string(SymbolicUtils.simplify(tree))
+            for (i, name) in enumerate(feature_names)
+                equation_str = replace(equation_str, "x$(i)" => name)
+            end
+            
+            score = best_member.score
+            complexity = best_member.complexity
+            
+            return equation_str, score, complexity
+        end
+        """)
+    
     julia_available = True
     st.sidebar.success("✅ Julia available")
 except Exception as e:
@@ -124,6 +167,7 @@ def discover_formula(
     # === Julia Short Formulas (SymbolicRegression.jl) ===
     if method == "julia_short" and julia_available:
         try:
+            from juliacall import Main as jl
             X_mat = jl.Matrix(X_arr)
             y_vec = jl.Vector(y_arr)
             fnames = jl.Vector(feature_names)
@@ -341,7 +385,7 @@ custom_model = st.sidebar.text_input(
     help="Enter a custom model, e.g., 'a * x1 + b * sin(x2) + c'. Leave blank for predefined models."
 )
 
-uploaded_files = st.file_uploader("📁 Upload Excel files", accept_multiple_files=True, type=['xlsx', 'xls'], help="Upload one or more Excel files with numeric data.")
+uploaded_files = st.file_uploader("📂 Upload Excel files", accept_multiple_files=True, type=['xlsx', 'xls'], help="Upload one or more Excel files with numeric data.")
 n_rows_input = st.number_input("Sample rows (0 for all)", min_value=0, value=0, help="Number of rows to sample (0 to use all)")
 n_rows = None if n_rows_input == 0 else n_rows_input
 
@@ -582,7 +626,7 @@ if 'formula_result' in st.session_state:
         with validation_placeholder.container():
             st.markdown("### Validate Formula")
             validation_files = st.file_uploader(
-                "📁 Upload Excel file for Validation",
+                "📂 Upload Excel file for Validation",
                 accept_multiple_files=True,
                 type=['xlsx', 'xls'],
                 key='validation_uploader',
