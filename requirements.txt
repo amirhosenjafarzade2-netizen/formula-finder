@@ -10,3 +10,6 @@ pysr
 gplearn
 openpyxl
 xlrd
+pysindy
+pysr
+aifeynman
