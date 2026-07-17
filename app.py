@@ -1,6 +1,7 @@
 """
 Standalone Streamlit App for Formula Discovery.
-Supports PySR (if Julia available), PolynomialFeatures, Nonlinear Curve Fitting (scipy), and Linear Regression.
+Supports PySR, AI Feynman, SINDy (dynamical systems), PolynomialFeatures,
+Nonlinear Curve Fitting (scipy), and Linear Regression.
 Run with: streamlit run formula_app.py
 """
 
@@ -11,6 +12,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import io
 import os
+import tempfile
 from typing import List, Dict, Any
 import sympy as sp
 from sklearn.metrics import r2_score
@@ -31,24 +33,42 @@ try:
 except Exception:
     pass
 
-linear_available = True  # Always available
-poly_available = True    # PolynomialFeatures is always available with sklearn
-curve_fit_available = True  # scipy.optimize.curve_fit is always available
-
-class FormulaDiscoveryError(Exceptiongdrr):
+sindy_available = False
+try:
+    import pysindy as ps
+    sindy_available = True
+except Exception:
     pass
-dfgdfgxdhdrtghd rh
+
+feynman_available = False
+try:
+    from aifeynman import run_aifeynman
+    feynman_available = True
+except Exception:
+    pass
+
+linear_available = True        # Always available
+poly_available = True           # PolynomialFeatures is always available with sklearn
+curve_fit_available = True      # scipy.optimize.curve_fit is always available
+
+
+class FormulaDiscoveryError(Exception):
+    pass
+
+
 @st.cache_data
 def discover_formula(
     X: pd.DataFrame,
     y: pd.Series,
     feature_names: List[str],
     max_complexity: int = 10,
-    n_iterations: ifcghdgytd
+    n_iterations: int = 100,
+    target_name: str = "y",
     method: str = "pysr",
     poly_degree: int = 2,
     nonlinear_model: str = "exponential",
-    custom_model: str = None
+    custom_model: str = None,
+    feynman_time_budget: int = 60
 ) -> Dict[str, Any]:
     X_arr = X.values.astype(np.float64)
     y_arr = y.values.astype(np.float64)
@@ -95,6 +115,78 @@ def discover_formula(
         except Exception as e:
             raise FormulaDiscoveryError(f"PySR failed: {e}")
 
+    # === AI Feynman (physics-inspired symbolic regression) ===
+    # NOTE: this is a best-effort integration. AI Feynman is a heavy external
+    # package (brute force + neural-net-guided search) that reads/writes files
+    # on disk and can take minutes. Its output format can vary slightly by
+    # package version, so the parsing below may need small tweaks for your
+    # installed version.
+    if method == "feynman" and feynman_available:
+        try:
+            tmpdir = tempfile.mkdtemp()
+            data_fname = "data.txt"
+            data_arr = np.column_stack([X_arr, y_arr])
+            np.savetxt(os.path.join(tmpdir, data_fname), data_arr)
+
+            run_aifeynman(
+                tmpdir + os.sep,
+                data_fname,
+                BF_try_time=feynman_time_budget,
+                BF_ops_file_type="14ops",
+                polyfit_deg=min(poly_degree, 4),
+                NN_epochs=100
+            )
+
+            results_dir = os.path.join(tmpdir, "results")
+            solution_path = os.path.join(results_dir, f"solution_{data_fname}")
+            if not os.path.exists(solution_path):
+                raise FormulaDiscoveryError(
+                    "AI Feynman did not produce a solution file. "
+                    "Try increasing the time budget or check your aifeynman version's output layout."
+                )
+
+            with open(solution_path) as f:
+                lines = [l.strip() for l in f.readlines() if l.strip()]
+
+            # Each line is typically: complexity, error/MDL, expression (format varies by version)
+            def parse_error(line):
+                parts = line.split()
+                try:
+                    return float(parts[1])
+                except Exception:
+                    return float("inf")
+
+            best_line = sorted(lines, key=parse_error)[0]
+            eq_str = best_line.split(",")[-1].strip()
+
+            var_map = {f"x{i}": name for i, name in enumerate(feature_names)}
+            for old, new in var_map.items():
+                eq_str = eq_str.replace(old, new)
+
+            equation = sp.sympify(eq_str)
+            complexity = len(list(sp.preorder_traversal(equation)))
+
+            y_pred = np.array([
+                float(equation.subs({sp.Symbol(n): X_arr[i, j] for j, n in enumerate(feature_names)}).evalf())
+                for i in range(len(X_arr))
+            ])
+            score = r2_score(y_arr, y_pred)
+
+            return {
+                "equation": equation,
+                "str_formula": str(sp.simplify(equation)),
+                "score": float(score),
+                "complexity": int(complexity),
+                "feature_names": feature_names,
+                "target_name": target_name,
+                "is_linear": False,
+                "method": "AI Feynman"
+            }
+        except FormulaDiscoveryError:
+            raise
+        except Exception as e:
+            raise FormulaDiscoveryError(f"AI Feynman failed: {e}")
+
     # === Polynomial Regression (PolynomialFeatures + LinearRegression) ===
     if method == "poly" and poly_available:
         try:
@@ -140,15 +232,30 @@ def discover_formula(
                 "power_law": lambda X, a, b, c: a * X[:, 0]**b + c
             }
 
+            params = None
             if nonlinear_model == "custom" and custom_model:
                 try:
                     expr = sp.sympify(custom_model)
-                    params = sorted([str(p) for p in expr.free_symbols if str(p) not in feature_names + [target_name]])
-                    def custom_func(X, *p):
-                        subs_dict = {sp.Symbol(feature_names[i]): X[:, i] for i in range(X.shape[1])}
-                        subs_dict.update({sp.Symbol(param): p[i] for i, param in enumerate(params)})
-                        return float(expr.subs(subs_dict).evalf())
+                    feature_symbols = [sp.Symbol(name) for name in feature_names]
+                    # FIX: previously this substituted whole numpy arrays into a
+                    # sympy expression one call at a time and cast the result to
+                    # a single float, which cannot work for more than one data
+                    # row (curve_fit always calls the model with the full array).
+                    # lambdify gives a properly vectorized numpy function instead.
+                    param_symbols = sorted(
+                        [s for s in expr.free_symbols if str(s) not in feature_names + [target_name]],
+                        key=str
+                    )
+                    func_lambdified = sp.lambdify(feature_symbols + param_symbols, expr, modules="numpy")
+
+                    def custom_func(X, *p, _f=func_lambdified, _nfeat=len(feature_names)):
+                        col_args = [X[:, i] for i in range(_nfeat)]
+                        result = _f(*col_args, *p)
+                        # broadcast in case the expression doesn't depend on every column
+                        return np.broadcast_to(np.asarray(result, dtype=np.float64), (X.shape[0],))
+
                     model_func = custom_func
+                    params = [str(s) for s in param_symbols]
                     n_params = len(params)
                 except Exception as e:
                     raise FormulaDiscoveryError(f"Invalid custom model: {e}")
@@ -158,7 +265,7 @@ def discover_formula(
                 if not model_func:
                     raise FormulaDiscoveryError(f"Unknown model: {nonlinear_model}")
 
-            popt, _ = curve_fit(model_func, X_arr, y_arr, maxfev=n_iterations * 100)
+            popt, _ = curve_fit(model_func, X_arr, y_arr, p0=np.ones(n_params), maxfev=n_iterations * 100)
             y_pred = model_func(X_arr, *popt)
             score = r2_score(y_arr, y_pred)
 
@@ -220,6 +327,52 @@ def discover_formula(
         }
     raise FormulaDiscoveryError(f"Method '{method}' not available.")
 
+
+@st.cache_data
+def discover_dynamics_sindy(
+    df_states: pd.DataFrame,
+    state_names: List[str],
+    dt: float = 1.0,
+    time_values: List[float] = None,
+    poly_degree: int = 2,
+    threshold: float = 0.1
+) -> Dict[str, Any]:
+    """
+    Fit a dynamical system dx/dt = f(x) from time-series data using SINDy
+    (Sparse Identification of Nonlinear Dynamics). Unlike the other methods
+    above, this does not predict a single target from features - it discovers
+    a coupled ODE system describing how ALL selected state variables evolve.
+    """
+    X = df_states[state_names].values.astype(np.float64)
+
+    if len(X) < 5:
+        raise FormulaDiscoveryError("Need at least 5 time points for SINDy.")
+    if np.any(np.isnan(X)):
+        raise FormulaDiscoveryError("Invalid data: NaNs found in selected state columns.")
+
+    t_arg = np.asarray(time_values, dtype=np.float64) if time_values is not None else dt
+
+    try:
+        model = ps.SINDy(
+            feature_names=state_names,
+            feature_library=ps.PolynomialLibrary(degree=poly_degree),
+            optimizer=ps.STLSQ(threshold=threshold)
+        )
+        model.fit(X, t=t_arg)
+        equations = model.equations()
+        score = model.score(X, t=t_arg)
+    except Exception as e:
+        raise FormulaDiscoveryError(f"SINDy failed: {e}")
+
+    return {
+        "equations": equations,   # list of strings, one per state variable: "x0' = ..."
+        "state_names": state_names,
+        "score": float(score),
+        "model": model,
+        "method": "SINDy (Sparse Identification of Nonlinear Dynamics)"
+    }
+
+
 @st.cache_data
 def load_and_preprocess_data(uploaded_files, n_rows=None):
     """Load numeric Excel data or generate sample."""
@@ -237,7 +390,21 @@ def load_and_preprocess_data(uploaded_files, n_rows=None):
     dfs = []
     for uploaded_file in uploaded_files:
         uploaded_file.seek(0)
-        df_temp = pd.read_excel(io.BytesIO(uploaded_file.read()), engine='openpyxl')
+        # FIX: engine='openpyxl' was hardcoded, but openpyxl cannot read legacy
+        # .xls files (only .xlsx/.xlsm) - any .xls upload used to crash here.
+        # Pick the engine based on the file extension instead.
+        fname_lower = uploaded_file.name.lower()
+        engine = "xlrd" if fname_lower.endswith(".xls") else "openpyxl"
+        try:
+            df_temp = pd.read_excel(io.BytesIO(uploaded_file.read()), engine=engine)
+        except Exception as e:
+            st.warning(
+                f"⚠️ Could not read '{uploaded_file.name}': {e}. "
+                f"If this is a legacy .xls file, make sure the 'xlrd' package is installed "
+                f"(`pip install xlrd`), or re-save it as .xlsx."
+            )
+            continue
+
         numeric_cols = df_temp.select_dtypes(include=[np.number]).columns.tolist()
         if numeric_cols:
             df_temp = df_temp[numeric_cols].fillna(df_temp[numeric_cols].median())
@@ -249,9 +416,10 @@ def load_and_preprocess_data(uploaded_files, n_rows=None):
         return pd.concat(dfs, ignore_index=True)
     return pd.DataFrame()
 
+
 def evaluate_formula(equation, X, feature_names, scaler=None, poly=None, model=None, method=""):
     """Evaluate formula on given data."""
-    if method == "poly" and scaler and poly and model:
+    if method == "poly" and scaler is not None and poly is not None and model is not None:
         X_scaled = scaler.transform(X.values)
         X_poly = poly.transform(X_scaled)
         return model.predict(X_poly)
@@ -267,14 +435,18 @@ def evaluate_formula(equation, X, feature_names, scaler=None, poly=None, model=N
                 y_pred.append(np.nan)
         return np.array(y_pred)
 
+
 # === Streamlit UI ===
 st.set_page_config(page_title="Formula Discovery App", layout="wide")
 
 st.title("🧮 Formula Discovery App")
 st.markdown("""
-Welcome to the Formula Discovery App! Upload an Excel file with numeric data, select features and a target variable, 
-and choose a method to discover a mathematical formula. After discovering a formula, you can validate it on new Excel data 
+Welcome to the Formula Discovery App! Upload an Excel file with numeric data, select features and a target variable,
+and choose a method to discover a mathematical formula. After discovering a formula, you can validate it on new Excel data
 or edit the formula interactively. Use the sidebar to configure settings.
+
+**Excel format expected:** first sheet only, numeric columns with a header row; non-numeric columns are dropped
+automatically; missing values are filled with the column median.
 """)
 
 st.sidebar.header("⚙️ Config")
@@ -282,7 +454,7 @@ st.sidebar.markdown("Adjust parameters for formula discovery.")
 n_iterations = st.sidebar.number_input("Iterations", min_value=10, value=100, help="Number of search iterations for PySR or curve fitting")
 max_complexity = st.sidebar.number_input("Max Complexity", min_value=1, value=10, help="Maximum equation size for PySR")
 min_rows = st.sidebar.number_input("Min Rows", min_value=5, value=10, help="Minimum data points required")
-poly_degree = st.sidebar.number_input("Polynomial Degree", min_value=1, value=2, help="Degree for Polynomial Regression")
+poly_degree = st.sidebar.number_input("Polynomial Degree", min_value=1, value=2, help="Degree for Polynomial Regression / SINDy library / AI Feynman poly-fit fallback")
 nonlinear_model = st.sidebar.selectbox(
     "Nonlinear Model",
     options=["exponential", "sinusoidal", "logistic", "power_law", "custom"],
@@ -293,6 +465,14 @@ custom_model = st.sidebar.text_input(
     value="",
     help="Enter a custom model, e.g., 'a * x1 + b * sin(x2) + c'. Leave blank for predefined models."
 )
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("**SINDy settings** (used only if SINDy is selected)")
+sindy_threshold = st.sidebar.number_input("SINDy Sparsity Threshold", min_value=0.0, value=0.1, step=0.01, help="Higher = sparser (simpler) discovered equations")
+sindy_dt = st.sidebar.number_input("SINDy Time Step (dt)", min_value=0.0001, value=1.0, help="Used if no explicit time column is selected")
+
+st.sidebar.markdown("**AI Feynman settings** (used only if AI Feynman is selected)")
+feynman_time_budget = st.sidebar.number_input("Feynman Time Budget (sec)", min_value=10, value=60, help="Brute-force search time budget per pass")
 
 uploaded_files = st.file_uploader("📁 Upload Excel files", accept_multiple_files=True, type=['xlsx', 'xls'], help="Upload one or more Excel files with numeric data.")
 n_rows_input = st.number_input("Sample rows (0 for all)", min_value=0, value=0, help="Number of rows to sample (0 to use all)")
@@ -313,6 +493,117 @@ if 'df' not in st.session_state:
 df = st.session_state.df
 params = df.select_dtypes(include=[np.number]).columns.tolist()
 
+# Available methods
+available_methods = []
+if pysr_available:
+    available_methods.append("pysr")
+if feynman_available:
+    available_methods.append("feynman")
+available_methods.extend(["poly", "curve_fit", "linear"])
+if sindy_available:
+    available_methods.append("sindy")
+
+method_options = {
+    "pysr": "PySR (Evolutionary Symbolic Regression): Finds complex formulas using genetic algorithms",
+    "feynman": "AI Feynman: Physics-inspired brute-force + neural-net-guided symbolic regression",
+    "poly": f"Polynomial Regression (Degree {poly_degree}): Fits a polynomial of specified degree",
+    "curve_fit": f"Nonlinear Curve Fitting ({nonlinear_model}): Fits a specific nonlinear model",
+    "linear": "Linear Regression: Fits a simple linear model",
+    "sindy": "SINDy: Discovers a dynamical system (dx/dt = f(x)) from time-series state variables"
+}
+
+if not pysr_available:
+    st.sidebar.caption("ℹ️ PySR not installed — `pip install pysr` to enable it.")
+if not feynman_available:
+    st.sidebar.caption("ℹ️ AI Feynman not installed — `pip install aifeynman` to enable it (heavy dependency, needs a Fortran compiler).")
+if not sindy_available:
+    st.sidebar.caption("ℹ️ SINDy not installed — `pip install pysindy` to enable it.")
+
+selected_method_key = st.radio(
+    "📊 Select Method",
+    options=available_methods,
+    format_func=lambda key: method_options[key],
+    index=0,
+    help="Choose a method based on your data and goal."
+)
+
+# =========================================================================
+# SINDy has a fundamentally different input shape (state variables over
+# time, not features -> single target), so it gets its own panel.
+# =========================================================================
+if selected_method_key == "sindy":
+    st.subheader("🌀 Dynamical Systems Discovery (SINDy)")
+    st.markdown(
+        "Select the columns that represent the **state variables of a dynamical system**, "
+        "measured at successive time steps (rows must already be in time order)."
+    )
+
+    state_vars = st.multiselect("🔧 Select State Variables", options=params, default=params[:min(2, len(params))])
+    use_time_col = st.checkbox("Use an explicit time column instead of a fixed dt", value=False)
+
+    time_col = None
+    if use_time_col:
+        time_col = st.selectbox("🕒 Time Column", options=[c for c in params if c not in state_vars])
+
+    run_sindy = st.button("🚀 Discover Dynamical System", type="primary")
+
+    if run_sindy:
+        if len(state_vars) < 1:
+            st.error("❌ Select at least one state variable.")
+            st.stop()
+        try:
+            df_states = df.dropna(subset=state_vars).reset_index(drop=True)
+            if len(df_states) < min_rows:
+                raise FormulaDiscoveryError(f"Insufficient valid data: {len(df_states)} rows (need ≥{min_rows})")
+
+            time_values = df_states[time_col].values.tolist() if time_col else None
+
+            sindy_result = discover_dynamics_sindy(
+                df_states, state_vars,
+                dt=sindy_dt,
+                time_values=time_values,
+                poly_degree=poly_degree,
+                threshold=sindy_threshold
+            )
+
+            st.success(f"✅ Dynamical system discovered with {sindy_result['method']}!")
+            st.metric("📊 Overall R² Score", f"{sindy_result['score']:.4f}")
+
+            st.subheader("📜 Discovered Equations")
+            for eq in sindy_result["equations"]:
+                st.code(eq, language="text")
+
+            # Simulate/compare against the actual trajectory for a quick visual check
+            try:
+                X_states = df_states[state_vars].values.astype(np.float64)
+                t_arg = np.asarray(time_values, dtype=np.float64) if time_values else sindy_dt
+                x_dot_actual = sindy_result["model"].differentiate(X_states, t=t_arg)
+                x_dot_pred = sindy_result["model"].predict(X_states)
+
+                for i, name in enumerate(state_vars):
+                    fig = px.scatter(
+                        x=x_dot_actual[:, i], y=x_dot_pred[:, i],
+                        labels={'x': f'Actual d{name}/dt', 'y': f'Predicted d{name}/dt'},
+                        title=f'SINDy fit check: d{name}/dt'
+                    )
+                    lo = min(x_dot_actual[:, i].min(), x_dot_pred[:, i].min())
+                    hi = max(x_dot_actual[:, i].max(), x_dot_pred[:, i].max())
+                    fig.add_trace(go.Scatter(x=[lo, hi], y=[lo, hi], mode='lines', name='Perfect Fit',
+                                              line=dict(dash='dash', color='red', width=2)))
+                    st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.warning(f"⚠️ Could not render derivative fit plots: {e}")
+
+        except FormulaDiscoveryError as e:
+            st.error(f"❌ Discovery Error: {str(e)}")
+        except Exception as e:
+            st.error(f"💥 Unexpected Error: {str(e)}")
+
+    st.stop()
+
+# =========================================================================
+# All other methods share the original features -> single target flow
+# =========================================================================
 col1, col2 = st.columns(2)
 with col1:
     formula_features = st.multiselect("🔧 Select Features", options=params, default=params[:-1] if len(params) > 1 else [], help="Select input variables for the formula")
@@ -322,27 +613,6 @@ with col2:
 if not formula_features or formula_target not in params or formula_target in formula_features:
     st.error("❌ Select valid features (excluding target).")
     st.stop()
-
-# Available methods
-available_methods = []
-if pysr_available:
-    available_methods.append("pysr")
-available_methods.extend(["poly", "curve_fit", "linear"])
-
-# Method choice
-method_options = {
-    "pysr": "PySR (Evolutionary Symbolic Regression): Finds complex formulas using genetic algorithms",
-    "poly": f"Polynomial Regression (Degree {poly_degree}): Fits a polynomial of specified degree",
-    "curve_fit": f"Nonlinear Curve Fitting ({nonlinear_model}): Fits a specific nonlinear model",
-    "linear": "Linear Regression: Fits a simple linear model"
-}
-selected_method_key = st.radio(
-    "📊 Select Method",
-    options=available_methods,
-    format_func=lambda key: method_options[key],
-    index=0,
-    help="Choose a method based on your data. PySR is best for complex relationships, Polynomial for smooth curves, Curve Fitting for specific models, Linear for simple relationships."
-)
 
 run_formula = st.button("🚀 Discover Formula", type="primary")
 
@@ -375,7 +645,8 @@ if run_formula:
             method=selected_method_key,
             poly_degree=poly_degree,
             nonlinear_model=nonlinear_model,
-            custom_model=custom_model
+            custom_model=custom_model,
+            feynman_time_budget=feynman_time_budget
         )
 
         progress_bar.progress(0.8)
@@ -475,10 +746,7 @@ Plain Text:
                 edited_eq = sp.sympify(edited_formula)
                 y_pred_edited = evaluate_formula(
                     edited_eq, X_formula, formula_result['feature_names'],
-                    scaler=formula_result.get("scaler") if selected_method_key != "poly" else None,
-                    poly=formula_result.get("poly") if selected_method_key != "poly" else None,
-                    model=formula_result.get("model") if selected_method_key != "poly" else None,
-                    method=""
+                    method=""  # always symbolic substitution for a freshly-edited formula
                 )
                 mask_valid_edited = ~np.isnan(y_pred_edited)
                 if mask_valid_edited.sum() > 0:
