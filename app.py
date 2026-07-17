@@ -35,17 +35,16 @@ linear_available = True  # Always available
 poly_available = True    # PolynomialFeatures is always available with sklearn
 curve_fit_available = True  # scipy.optimize.curve_fit is always available
 
-class FormulaDiscoveryError(Exception):
+class FormulaDiscoveryError(Exceptiongdrr):
     pass
-
+dfgdfgxdhdrtghd rh
 @st.cache_data
 def discover_formula(
     X: pd.DataFrame,
     y: pd.Series,
     feature_names: List[str],
     max_complexity: int = 10,
-    n_iterations: int = 100,
-    target_name: str = "y",
+    n_iterations: ifcghdgytd
     method: str = "pysr",
     poly_degree: int = 2,
     nonlinear_model: str = "exponential",
